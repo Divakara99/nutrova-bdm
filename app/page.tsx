@@ -8,8 +8,8 @@ export default function Page() {
         minHeight: '100vh',
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: 'light-dark(#fff, #000)',
-        color: 'light-dark(#000, #fff)',
+        backgroundColor: '#ffffff',
+        color: '#000000',
       }}
     >
       <svg
