@@ -1,20 +1,22 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Plus, Search } from 'lucide-react'
+import { Plus, Search, Upload } from 'lucide-react'
 import { createId, updateTracker } from '@/lib/tracker/store'
 import { LISTED_LIMIT, type Doctor } from '@/lib/tracker/types'
 import { cn } from '@/lib/utils'
 import { DoctorCard } from './doctor-card'
 import { DoctorDetail } from './doctor-detail'
 import { DoctorForm } from './doctor-form'
-import { EmptyState, Sheet, inputClass, primaryButtonClass } from './primitives'
+import { BulkImport } from './bulk-import'
+import { EmptyState, Sheet, ghostButtonClass, inputClass, primaryButtonClass } from './primitives'
 
 export function DoctorsView({ doctors }: { doctors: Doctor[] }) {
   const [tab, setTab] = useState<'listed' | 'unlisted'>('listed')
   const [query, setQuery] = useState('')
   const [openId, setOpenId] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
+  const [importing, setImporting] = useState(false)
 
   const listedCount = doctors.filter((d) => d.listed).length
   const unlistedCount = doctors.length - listedCount
@@ -43,10 +45,16 @@ export function DoctorsView({ doctors }: { doctors: Doctor[] }) {
           <h1 className="font-heading text-2xl font-bold text-foreground">Doctors</h1>
           <p className="text-sm text-muted-foreground">Tap a doctor to log visits and update status.</p>
         </div>
-        <button type="button" className={primaryButtonClass} onClick={() => setAdding(true)}>
-          <Plus className="size-4" aria-hidden="true" />
-          Add
-        </button>
+        <div className="flex gap-2">
+          <button type="button" className={ghostButtonClass} onClick={() => setImporting(true)}>
+            <Upload className="size-4" aria-hidden="true" />
+            Import
+          </button>
+          <button type="button" className={primaryButtonClass} onClick={() => setAdding(true)}>
+            <Plus className="size-4" aria-hidden="true" />
+            Add
+          </button>
+        </div>
       </div>
 
       <div role="tablist" aria-label="Doctor lists" className="grid grid-cols-2 gap-1 rounded-xl bg-secondary p-1">
@@ -103,6 +111,17 @@ export function DoctorsView({ doctors }: { doctors: Doctor[] }) {
         {openDoctor && (
           <DoctorDetail key={openDoctor.id} doctor={openDoctor} listedFull={listedFull} onDeleted={() => setOpenId(null)} />
         )}
+      </Sheet>
+
+      <Sheet open={importing} onClose={() => setImporting(false)} title="Import doctors">
+        <BulkImport
+          doctors={doctors}
+          onDone={(target) => {
+            setTab(target)
+            setQuery('')
+            setImporting(false)
+          }}
+        />
       </Sheet>
 
       <Sheet open={adding} onClose={() => setAdding(false)} title="Add doctor">
