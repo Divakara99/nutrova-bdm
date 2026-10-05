@@ -3,8 +3,8 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'v0 App',
-  description: 'Created with v0',
+  title: 'Nutrova | Doctor Tracker',
+  description: 'Keep your appointments, care team, and health records organized in one place.',
   generator: 'v0.app',
   icons: {
     icon: [
