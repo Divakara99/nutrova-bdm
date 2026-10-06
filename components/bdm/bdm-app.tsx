@@ -631,7 +631,7 @@ const emptyReminder = (): Reminder => ({ id: uid(), doctorName: "", doctorArea: 
 const emptyPayment = (): Payment => ({ id: uid(), invoiceNo: genInvoiceNo(), doctorName: "", doctorArea: "", purpose: "", amount: 0, dueDate: todayISO(), paidDate: "", status: "pending", mode: "UPI" });
 
 export default function App() {
-  const [signedIn, setSignedIn] = useState(true);
+  const [signedIn, setSignedIn] = useState(false);
   const [loginEmail, setLoginEmail] = useState("divakar.reddy@nutrova.com");
   const [bio, setBio] = useLocal<Bio>("nutrova-bio-v1", seedBio);
   const [doctors, setDoctors] = useLocal<Doctor[]>("nutrova-doctors-v3", seedDoctors);
