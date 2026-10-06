@@ -2,21 +2,26 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  AlarmClock,
   Bell,
+  BellRing,
   Building2,
   CalendarClock,
   CalendarDays,
   Check,
+  ChevronDown,
   Clock,
   Cloud,
   CloudOff,
   Copy,
+  Database,
   Download,
   Eye,
   EyeOff,
   FileText,
   IndianRupee,
   Layers,
+  Lock,
   LogOut,
   Mail,
   MapPin,
@@ -26,30 +31,40 @@ import {
   Plus,
   RefreshCcw,
   Search,
+  Menu,
+  Settings as SettingsIcon,
   Share2,
+  Smartphone,
   Stethoscope,
   Target,
   Trash2,
   User,
   UserPlus,
+  Volume2,
   Wallet,
   X,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import {
   SETUP_SQL,
-  clearConfig,
+  adoptRecoverySession,
   clearSession,
+  clearUrlAuthParams,
+  exchangeRecoveryCode,
   fetchAll,
+  getUrlRecoverySignal,
   loadSession,
+  maskKey,
   readConfig,
-  saveConfig,
+  requestPasswordReset,
   saveKey,
-  shareHash,
   signInRemote,
   signUpRemote,
+  updatePasswordRemote,
+  verifyRecoveryTokenHash,
   type BackendConfig,
   type BackendSession,
+  type UrlRecoverySignal,
 } from "./backend";
 
 /* ---------------------------------- types ---------------------------------- */
@@ -103,6 +118,7 @@ interface Reminder {
   kind: ReminderKind;
   notes: string;
   done: boolean;
+  alarm?: boolean;
 }
 
 /* A purchase order line — Nutrova product ordered by the doctor */
@@ -119,6 +135,7 @@ interface Payment {
   items: OrderItem[];
   doctorName: string;
   doctorArea: string;
+  billingName: string;
   purpose: string;
   amount: number;
   dueDate: string;
@@ -299,6 +316,7 @@ const normPay = (p: Partial<Payment>): Payment => ({
   items: Array.isArray(p.items) ? p.items.map((i) => ({ product: String(i.product || ""), qty: Number(i.qty) || 0, rate: Number(i.rate) || 0 })) : [],
   doctorName: String(p.doctorName || ""),
   doctorArea: String(p.doctorArea || ""),
+  billingName: String(p.billingName || ""),
   purpose: String(p.purpose || ""),
   amount: Number(p.amount) || 0,
   dueDate: String(p.dueDate || ""),
@@ -348,23 +366,10 @@ const migrateProducts = (list: unknown): string[] => {
   return out;
 };
 
-const PATCH_COLORS = ["emerald", "violet", "amber", "sky", "rose", "teal"];
-
-function patchStyles(color: string) {
-  switch (color) {
-    case "violet":
-      return { dot: "bg-violet-500", badge: "border-violet-200 bg-violet-50 text-violet-700", ring: "ring-violet-200", soft: "bg-violet-50" };
-    case "amber":
-      return { dot: "bg-amber-500", badge: "border-amber-200 bg-amber-50 text-amber-800", ring: "ring-amber-200", soft: "bg-amber-50" };
-    case "sky":
-      return { dot: "bg-sky-500", badge: "border-sky-200 bg-sky-50 text-sky-700", ring: "ring-sky-200", soft: "bg-sky-50" };
-    case "rose":
-      return { dot: "bg-rose-500", badge: "border-rose-200 bg-rose-50 text-rose-700", ring: "ring-rose-200", soft: "bg-rose-50" };
-    case "teal":
-      return { dot: "bg-teal-500", badge: "border-teal-200 bg-teal-50 text-teal-700", ring: "ring-teal-200", soft: "bg-teal-50" };
-    default:
-      return { dot: "bg-emerald-500", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", ring: "ring-emerald-200", soft: "bg-emerald-50" };
-  }
+/* Patches have no colour option — single emerald style everywhere */
+function patchStyles(_color?: string) {
+  void _color;
+  return { dot: "bg-emerald-500", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", ring: "ring-emerald-200", soft: "bg-emerald-50" };
 }
 
 /* --------------------------------- helpers --------------------------------- */
@@ -659,7 +664,7 @@ const seedPatches = (): Patch[] => {
         });
         const unique = Array.from(new Set(names.map((n) => n.trim()).filter(Boolean)));
         if (unique.length > 0) {
-          return unique.map((n, i) => ({ id: uid() + i, name: n, color: PATCH_COLORS[i % PATCH_COLORS.length] }));
+          return unique.map((n, i) => ({ id: uid() + i, name: n, color: "emerald" }));
         }
       }
     }
@@ -668,17 +673,17 @@ const seedPatches = (): Patch[] => {
   }
   return [
     { id: "a1", name: "Koramangala", color: "emerald" },
-    { id: "a2", name: "HSR Layout", color: "violet" },
-    { id: "a3", name: "Jayanagar", color: "amber" },
-    { id: "a4", name: "Indiranagar", color: "sky" },
-    { id: "a5", name: "Whitefield", color: "rose" },
-    { id: "a6", name: "Malleshwaram", color: "teal" },
+    { id: "a2", name: "HSR Layout", color: "emerald" },
+    { id: "a3", name: "Jayanagar", color: "emerald" },
+    { id: "a4", name: "Indiranagar", color: "emerald" },
+    { id: "a5", name: "Whitefield", color: "emerald" },
+    { id: "a6", name: "Malleshwaram", color: "emerald" },
     { id: "a7", name: "Peenya", color: "emerald" },
-    { id: "a8", name: "Electronic City", color: "violet" },
-    { id: "a9", name: "JP Nagar", color: "amber" },
-    { id: "a10", name: "Marathahalli", color: "sky" },
-    { id: "a11", name: "BTM Layout", color: "rose" },
-    { id: "a12", name: "Rajajinagar", color: "teal" },
+    { id: "a8", name: "Electronic City", color: "emerald" },
+    { id: "a9", name: "JP Nagar", color: "emerald" },
+    { id: "a10", name: "Marathahalli", color: "emerald" },
+    { id: "a11", name: "BTM Layout", color: "emerald" },
+    { id: "a12", name: "Rajajinagar", color: "emerald" },
   ];
 };
 
@@ -752,11 +757,11 @@ const seedReminders = (): Reminder[] => [
 const seedPayments = (): Payment[] => {
   const yr = new Date().getFullYear();
   const samples: Payment[] = [
-    normPay({ id: "p1", invoiceNo: `PO-${yr}-1041`, orderDate: addDays(-12), doctorName: "Dr. Meera Iyer", doctorArea: "HSR Layout", purpose: "Clinic stock order", items: [{ product: "Nutrova Kerastrength", qty: 10, rate: 1070 }, { product: "Nutrova Complete Omega 3", qty: 4, rate: 1070 }], amount: 14980, dueDate: addDays(-2), status: "pending", mode: "UPI" }),
-    normPay({ id: "p2", invoiceNo: `PO-${yr}-1042`, orderDate: addDays(-4), doctorName: "Dr. Priya Nair", doctorArea: "Indiranagar", purpose: "Aesthetic studio order", items: [{ product: "Nutrova Collagen+Antioxidants (Cranberry Flavour)", qty: 2, rate: 2575 }, { product: "Nutrova Poultry Collagen Peptides", qty: 1, rate: 3120 }], amount: 8270, dueDate: addDays(3), status: "pending", mode: "Bank Transfer" }),
-    normPay({ id: "p3", invoiceNo: `PO-${yr}-1039`, orderDate: addDays(-20), doctorName: "Dr. Ananya Sharma", doctorArea: "Koramangala", purpose: "Monthly derma-nutrition order", items: [{ product: "Nutrova Marine Collagen Peptides", qty: 6, rate: 2140 }, { product: "Nutrova Kerastrength", qty: 8, rate: 1070 }], amount: 21400, dueDate: addDays(-10), paidDate: addDays(-9), status: "paid", mode: "Cheque" }),
-    normPay({ id: "p4", invoiceNo: `PO-${yr}-1031`, orderDate: addDays(-60), doctorName: "Dr. Vikram Malhotra", doctorArea: "Whitefield", purpose: "Post-op nutrition range", items: [{ product: "Nutrova Whey Protein Isolate - Dark Chocolate Flavour", qty: 5, rate: 1800 }], amount: 9000, dueDate: addDays(-45), status: "pending", mode: "Cheque" }),
-    normPay({ id: "p5", invoiceNo: `PO-${yr}-1036`, orderDate: addDays(-35), doctorName: "Dr. Farhan Khan", doctorArea: "Peenya", purpose: "Clinic stock order", items: [{ product: "Nutrova Poultry Collagen Peptides", qty: 2, rate: 3120 }, { product: "Nutrova Whey Protein Isolate - Vanilla Flavour", qty: 2, rate: 1800 }], amount: 9840, dueDate: addDays(-20), status: "pending", mode: "UPI" }),
+    normPay({ id: "p1", invoiceNo: `PO-${yr}-1041`, orderDate: addDays(-12), doctorName: "Dr. Meera Iyer", doctorArea: "HSR Layout", billingName: "DermaCare Clinic", purpose: "Clinic stock order", items: [{ product: "Nutrova Kerastrength", qty: 10, rate: 1070 }, { product: "Nutrova Complete Omega 3", qty: 4, rate: 1070 }], amount: 14980, dueDate: addDays(-2), status: "pending", mode: "UPI" }),
+    normPay({ id: "p2", invoiceNo: `PO-${yr}-1042`, orderDate: addDays(-4), doctorName: "Dr. Priya Nair", doctorArea: "Indiranagar", billingName: "Lumière Aesthetic Studio", purpose: "Aesthetic studio order", items: [{ product: "Nutrova Collagen+Antioxidants (Cranberry Flavour)", qty: 2, rate: 2575 }, { product: "Nutrova Poultry Collagen Peptides", qty: 1, rate: 3120 }], amount: 8270, dueDate: addDays(3), status: "pending", mode: "Bank Transfer" }),
+    normPay({ id: "p3", invoiceNo: `PO-${yr}-1039`, orderDate: addDays(-20), doctorName: "Dr. Ananya Sharma", doctorArea: "Koramangala", billingName: "SkinGlow Aesthetics", purpose: "Monthly derma-nutrition order", items: [{ product: "Nutrova Marine Collagen Peptides", qty: 6, rate: 2140 }, { product: "Nutrova Kerastrength", qty: 8, rate: 1070 }], amount: 21400, dueDate: addDays(-10), paidDate: addDays(-9), status: "paid", mode: "Cheque" }),
+    normPay({ id: "p4", invoiceNo: `PO-${yr}-1031`, orderDate: addDays(-60), doctorName: "Dr. Vikram Malhotra", doctorArea: "Whitefield", billingName: "Renew Plastic Surgery Centre", purpose: "Post-op nutrition range", items: [{ product: "Nutrova Whey Protein Isolate - Dark Chocolate Flavour", qty: 5, rate: 1800 }], amount: 9000, dueDate: addDays(-45), status: "pending", mode: "Cheque" }),
+    normPay({ id: "p5", invoiceNo: `PO-${yr}-1036`, orderDate: addDays(-35), doctorName: "Dr. Farhan Khan", doctorArea: "Peenya", billingName: "Elite Cosmetic Surgery", purpose: "Clinic stock order", items: [{ product: "Nutrova Poultry Collagen Peptides", qty: 2, rate: 3120 }, { product: "Nutrova Whey Protein Isolate - Vanilla Flavour", qty: 2, rate: 1800 }], amount: 9840, dueDate: addDays(-20), status: "pending", mode: "UPI" }),
   ];
   /* keep anything the user added themselves in older versions */
   const extra: Payment[] = [];
@@ -792,24 +797,129 @@ const KIND_COLORS: Record<ReminderKind, string> = {
 
 /* ---------------------------------- app ---------------------------------- */
 
-type Tab = "dashboard" | "doctors" | "reminders" | "payments" | "bio";
+type Tab = "dashboard" | "doctors" | "reminders" | "payments" | "bio" | "settings";
 
 const emptyDoctor = (): Doctor => ({
   id: uid(), name: "", specialty: "Cosmetic Dermatologist", qualification: "", clinic: "", area: "",
   patchId: "", city: "Bangalore", phone: "", email: "", frequency: "Weekly",
-  lastVisit: "", nextVisit: todayISO(), notes: "", priority: "Medium",
+  lastVisit: "", nextVisit: "", notes: "", priority: "Medium",
   callDays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], monthlyCalls: [], callTimeFrom: "10:00", callTimeTo: "13:00",
   focusProducts: [], followProducts: [],
   appointmentModes: [], appointmentContact: "", appointmentPhone: "", appointmentLead: "Same day", appointmentNote: "",
 });
-const emptyReminder = (): Reminder => ({ id: uid(), doctorName: "", doctorArea: "", title: "", date: todayISO(), time: "10:00", kind: "Visit", notes: "", done: false });
-const emptyPayment = (): Payment => ({ id: uid(), invoiceNo: genInvoiceNo(), orderDate: todayISO(), items: [{ product: "", qty: 1, rate: 0 }], doctorName: "", doctorArea: "", purpose: "", amount: 0, dueDate: addDays(30), paidDate: "", status: "pending", mode: "UPI" });
+const emptyReminder = (): Reminder => ({ id: uid(), doctorName: "", doctorArea: "", title: "", date: todayISO(), time: "10:00", kind: "Visit", notes: "", done: false, alarm: true });
+const emptyPayment = (): Payment => ({ id: uid(), invoiceNo: genInvoiceNo(), orderDate: todayISO(), items: [{ product: "", qty: 1, rate: 0 }], doctorName: "", doctorArea: "", billingName: "", purpose: "", amount: 0, dueDate: addDays(30), paidDate: "", status: "pending", mode: "" });
+
+/* Android PHONE only — never tablets, never web/desktop.
+   Phones send "Mobile" in the UA (tablets don't) and have a small screen.
+   Desktop with a narrow window won't match (no Android UA). */
+function isAndroidPhoneDevice(): boolean {
+  try {
+    const ua = navigator.userAgent || "";
+    const isAndroid = /Android/i.test(ua);
+    const isMobileUA = /Mobile/i.test(ua);
+    const smallScreen = window.innerWidth < 640;
+    return isAndroid && isMobileUA && smallScreen;
+  } catch {
+    return false;
+  }
+}
+function useIsAndroidPhone(): boolean {
+  const [isPhone, setIsPhone] = useState<boolean>(() =>
+    typeof window === "undefined" ? false : isAndroidPhoneDevice()
+  );
+  useEffect(() => {
+    const check = () => setIsPhone(isAndroidPhoneDevice());
+    check();
+    window.addEventListener("resize", check);
+    window.addEventListener("orientationchange", check);
+    return () => {
+      window.removeEventListener("resize", check);
+      window.removeEventListener("orientationchange", check);
+    };
+  }, []);
+  useEffect(() => {
+    try {
+      document.documentElement.classList.toggle("android-phone", isPhone);
+    } catch {
+      /* ignore */
+    }
+  }, [isPhone]);
+  return isPhone;
+}
+
+/* ---------- Reminder alarm: sound + phone notification (no audio files needed) ---------- */
+let alarmAudioCtx: AudioContext | null = null;
+function playAlarmSound(repeats = 3) {
+  try {
+    const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AC) return;
+    if (!alarmAudioCtx) alarmAudioCtx = new AC();
+    if (alarmAudioCtx.state === "suspended") void alarmAudioCtx.resume();
+    const ctx = alarmAudioCtx;
+    const start = ctx.currentTime + 0.05;
+    for (let i = 0; i < repeats; i++) {
+      const t0 = start + i * 0.55;
+      [880, 660].forEach((freq, j) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const t = t0 + j * 0.22;
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, t);
+        gain.gain.setValueAtTime(0.001, t);
+        gain.gain.exponentialRampToValueAtTime(0.6, t + 0.04);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.22);
+      });
+    }
+  } catch {
+    /* audio not available on this device */
+  }
+}
+function reminderDueAt(r: { date: string; time: string }): number {
+  try {
+    const t = new Date(`${r.date}T${r.time || "09:00"}:00`).getTime();
+    return Number.isFinite(t) ? t : 0;
+  } catch {
+    return 0;
+  }
+}
+function showBrowserNotification(title: string, body: string, tag: string) {
+  try {
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification(title, { body, tag });
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 export default function App() {
   /* Auth — first time shows an empty login screen, then stays signed in until Sign out */
   const [users, setUsers] = useState<AppUser[]>(() => loadUsers());
   const [sessionEmail, setSessionEmail] = useState<string>(() => loadSessionEmail());
-  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [authMode, setAuthMode] = useState<"login" | "signup" | "forgot">("login");
+  const [forgotSent, setForgotSent] = useState(false);
+  /* Password-reset link detection — Supabase sends several URL shapes, handle them all */
+  const [urlSignal] = useState<UrlRecoverySignal | null>(() =>
+    typeof window === "undefined" ? null : getUrlRecoverySignal()
+  );
+  const [recoveryTokens, setRecoveryTokens] = useState<{ access_token: string; refresh_token: string } | null>(() =>
+    urlSignal?.kind === "hash-tokens"
+      ? { access_token: urlSignal.access_token, refresh_token: urlSignal.refresh_token }
+      : null
+  );
+  const [recoverySession, setRecoverySession] = useState<BackendSession | null>(null);
+  const [recoveryExchanging, setRecoveryExchanging] = useState(false);
+  const [recoveryDismissed, setRecoveryDismissed] = useState(false);
+  const recoveryExchangeTried = useRef(false);
+  const [recoveryPw, setRecoveryPw] = useState("");
+  const [recoveryPw2, setRecoveryPw2] = useState("");
+  const [showRecoveryPw, setShowRecoveryPw] = useState(false);
+  const [recovering, setRecovering] = useState(false);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [showLoginPass, setShowLoginPass] = useState(false);
@@ -822,17 +932,27 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [shareOpen, setShareOpen] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
-  /* ---------- Online store (backend) ---------- */
-  const [cfg, setCfg] = useState<BackendConfig | null>(() => readConfig());
+  /* Android phone only — fonts + sentences adjust, tablets & web untouched */
+  const isAndroidPhone = useIsAndroidPhone();
+  /* ---------- Online store (backend) — connection is locked, URL + key never change ---------- */
+  const [cfg] = useState<BackendConfig | null>(() => readConfig());
   const online = !!cfg;
-  const [session, setSession] = useState<BackendSession | null>(() => (readConfig() ? loadSession() : null));
+  const [session, setSession] = useState<BackendSession | null>(() => loadSession());
   const [remote, setRemote] = useState<Record<string, unknown> | null>(null);
   const [syncState, setSyncState] = useState<"idle" | "loading" | "synced" | "error">("idle");
   const [syncError, setSyncError] = useState("");
   const [retryTick, setRetryTick] = useState(0);
-  const [setupOpen, setSetupOpen] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authInfo, setAuthInfo] = useState("");
+  /* Settings page */
+  const [lastSync, setLastSync] = useState<number | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [sqlCopied, setSqlCopied] = useState(false);
+  const [newPw, setNewPw] = useState("");
+  const [newPw2, setNewPw2] = useState("");
+  const [showNewPw, setShowNewPw] = useState(false);
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (!cfg || !session) {
@@ -848,6 +968,7 @@ export default function App() {
         if (cancelled) return;
         setRemote(map);
         setSyncState("synced");
+        setLastSync(Date.now());
       })
       .catch((e) => {
         if (cancelled) return;
@@ -867,7 +988,10 @@ export default function App() {
       push: (key, value) => {
         if (!cfg) return;
         saveKey(cfg, key, value)
-          .then(() => setSyncState("synced"))
+          .then(() => {
+            setSyncState("synced");
+            setLastSync(Date.now());
+          })
           .catch((e) => {
             setSyncState("error");
             setSyncError(e instanceof Error ? e.message : "Could not save to online store");
@@ -924,6 +1048,7 @@ export default function App() {
   }, []);
 
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [frozenScrolled, setFrozenScrolled] = useState(false);
   const [search, setSearch] = useState("");
   const [specFilter, setSpecFilter] = useState("All");
@@ -941,7 +1066,7 @@ export default function App() {
   const [reminderModal, setReminderModal] = useState<{ open: boolean; draft: Reminder; editing: boolean }>({ open: false, draft: emptyReminder(), editing: false });
   const [paymentModal, setPaymentModal] = useState<{ open: boolean; draft: Payment; editing: boolean }>({ open: false, draft: emptyPayment(), editing: false });
   const [patchModal, setPatchModal] = useState(false);
-  const [patchDraft, setPatchDraft] = useState<{ id: string; name: string; color: string }>({ id: "", name: "", color: "emerald" });
+  const [patchDraft, setPatchDraft] = useState<{ id: string; name: string }>({ id: "", name: "" });
   const [quickArea, setQuickArea] = useState("");
   const [monWeek, setMonWeek] = useState("1st");
   const [monDay, setMonDay] = useState("Tuesday");
@@ -958,6 +1083,88 @@ export default function App() {
     setToast({ msg, kind });
     window.setTimeout(() => setToast(null), 2600);
   };
+
+  /* ---------- Reminder alarms: in-app ringing + sound + phone notification ---------- */
+  const [ringing, setRinging] = useState<Reminder[]>([]);
+  const [alertsOn, setAlertsOn] = useState(false);
+  const dismissedRef = useRef<Set<string>>(new Set());
+  const snoozedRef = useRef<Map<string, number>>(new Map());
+
+  const enableAlerts = async () => {
+    try {
+      if ("Notification" in window && Notification.permission === "default") {
+        await Notification.requestPermission();
+      }
+    } catch {
+      /* ignore */
+    }
+    playAlarmSound(1);
+    setAlertsOn(true);
+    showToast("Alerts on — reminders will ring with sound");
+  };
+  const testAlarmSound = () => {
+    playAlarmSound(2);
+    showToast("Playing test alarm", "info");
+  };
+  const snoozeReminder = (id: string, mins = 10) => {
+    snoozedRef.current.set(id, Date.now() + mins * 60000);
+    dismissedRef.current.delete(id);
+    setRinging((prev) => prev.filter((x) => x.id !== id));
+    showToast(`Snoozed for ${mins} min`, "info");
+  };
+  const dismissRinging = (id: string) => {
+    dismissedRef.current.add(id);
+    setRinging((prev) => prev.filter((x) => x.id !== id));
+  };
+  const completeRinging = (r: Reminder) => {
+    dismissedRef.current.delete(r.id);
+    snoozedRef.current.delete(r.id);
+    setReminders((prev) => prev.map((x) => (x.id === r.id ? { ...x, done: true } : x)));
+    setRinging((prev) => prev.filter((x) => x.id !== r.id));
+    showToast("Reminder completed");
+  };
+
+  /* due-check: every 15s, ring reminders whose date + time has arrived */
+  useEffect(() => {
+    if (!signedIn) return;
+    const check = () => {
+      const now = Date.now();
+      setRinging((prev) => {
+        const ringingIds = new Set(prev.map((x) => x.id));
+        const fresh: Reminder[] = [];
+        for (const r of reminders) {
+          if (r.done) continue;
+          if (r.alarm === false) continue;
+          const due = reminderDueAt(r);
+          if (!due || due > now) continue;
+          const snoozedUntil = snoozedRef.current.get(r.id) || 0;
+          if (now < snoozedUntil) continue;
+          if (snoozedUntil) snoozedRef.current.delete(r.id);
+          if (dismissedRef.current.has(r.id)) continue;
+          if (!ringingIds.has(r.id)) fresh.push(r);
+        }
+        const alive = prev.filter((x) => {
+          const cur = reminders.find((rr) => rr.id === x.id);
+          return cur && !cur.done;
+        });
+        if (fresh.length > 0) {
+          playAlarmSound(3);
+          fresh.forEach((r) =>
+            showBrowserNotification(
+              `Reminder: ${r.title}`,
+              `${r.doctorName || "General"}${r.doctorArea ? " · " + r.doctorArea : ""} · ${fmtDate(r.date)} ${r.time || ""}`.trim(),
+              `nutrova-reminder-${r.id}`
+            )
+          );
+          return [...alive, ...fresh.map((r) => ({ ...r }))];
+        }
+        return alive.length === prev.length ? prev : alive;
+      });
+    };
+    check();
+    const t = window.setInterval(check, 15000);
+    return () => window.clearInterval(t);
+  }, [reminders, signedIn]);
 
   /* ---------- auth handlers: online store first, local fallback when not connected ---------- */
   const persistSession = (email: string) => {
@@ -1042,6 +1249,53 @@ export default function App() {
       setAuthBusy(false);
     }
   };
+  const handleForgotPassword = async () => {
+    const email = loginEmail.trim().toLowerCase();
+    setAuthError(""); setAuthInfo("");
+    if (!email || !email.includes("@")) return setAuthError("Please enter your account email");
+    if (!online || !cfg) return setAuthError("Password reset needs internet — the online store is not connected");
+    setAuthBusy(true);
+    try {
+      await requestPasswordReset(cfg, email);
+      setForgotSent(true);
+      setAuthInfo(`Reset link sent to ${email}. Open the email on this phone, tap the link, then set a new password.`);
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : "Could not send reset link");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+  const handleSetNewPassword = async () => {
+    setAuthError("");
+    if (!recoveryPw || recoveryPw.length < 6) return setAuthError("Password must be 6+ characters");
+    if (recoveryPw !== recoveryPw2) return setAuthError("Passwords do not match");
+    if (!cfg || (!recoveryTokens && !recoverySession)) return setAuthError("Reset session missing — please request a new link");
+    setRecovering(true);
+    try {
+      /* hash-token links adopt the session now; code/token links were already exchanged on arrival */
+      const s = recoveryTokens ? await adoptRecoverySession(cfg, recoveryTokens) : recoverySession!;
+      await updatePasswordRemote(cfg, recoveryPw);
+      setSession(s);
+      setBio((b) => ({ ...b, email: s.email || b.email, name: s.name || b.name }));
+      setRecoveryTokens(null);
+      setRecoverySession(null);
+      clearUrlAuthParams();
+      setRecoveryPw(""); setRecoveryPw2(""); setShowRecoveryPw(false);
+      showToast(`Password updated — welcome${firstName(s.name) ? ", " + firstName(s.name) : ""}`);
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : "Could not reset password");
+    } finally {
+      setRecovering(false);
+    }
+  };
+  const cancelRecovery = () => {
+    setRecoveryDismissed(true);
+    setRecoveryTokens(null);
+    setRecoverySession(null);
+    clearUrlAuthParams();
+    setRecoveryPw(""); setRecoveryPw2("");
+    setAuthError("");
+  };
   const doSignOut = () => {
     if (online) {
       /* clear the cached copy so the next person on this phone never sees this account's data */
@@ -1064,9 +1318,73 @@ export default function App() {
       onYes: () => { closeConfirm(); doSignOut(); },
     });
   };
+
+  /* ---------- Settings handlers ---------- */
+  /* Sync now: if your data has loaded, upload everything on this phone to the online store
+     (so nothing typed while offline is lost); if it never loaded, fetch it again instead. */
+  const syncNow = async () => {
+    if (!cfg || !session) return;
+    if (remote === null) {
+      setRetryTick((n) => n + 1);
+      return;
+    }
+    setSyncBusy(true);
+    try {
+      await Promise.all([
+        saveKey(cfg, "nutrova-bio-v1", bio),
+        saveKey(cfg, "nutrova-doctors-v3", doctors),
+        saveKey(cfg, "nutrova-patches-v2", patches),
+        saveKey(cfg, "nutrova-reminders-v1", reminders),
+        saveKey(cfg, "nutrova-payments-v3", payments),
+      ]);
+      setSyncState("synced");
+      setSyncError("");
+      setLastSync(Date.now());
+      showToast("All your data is saved in the online store");
+    } catch (e) {
+      setSyncState("error");
+      setSyncError(e instanceof Error ? e.message : "Could not sync with the online store");
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+  const copySetupSql = async () => {
+    try {
+      await navigator.clipboard.writeText(SETUP_SQL);
+      setSqlCopied(true);
+      setTimeout(() => setSqlCopied(false), 2000);
+    } catch {
+      showToast("Copy failed — select the SQL text and copy it", "info");
+    }
+  };
+  const handleChangePassword = async () => {
+    setPwMsg(null);
+    if (!newPw || newPw.length < 6) return setPwMsg({ ok: false, text: "Password must be 6+ characters" });
+    if (newPw !== newPw2) return setPwMsg({ ok: false, text: "Passwords do not match" });
+    if (online && cfg) {
+      setPwBusy(true);
+      try {
+        await updatePasswordRemote(cfg, newPw);
+        setNewPw(""); setNewPw2(""); setShowNewPw(false);
+        setPwMsg({ ok: true, text: "Password updated — use the new password next time you sign in" });
+        showToast("Password updated");
+      } catch (e) {
+        setPwMsg({ ok: false, text: e instanceof Error ? e.message : "Could not update password" });
+      } finally {
+        setPwBusy(false);
+      }
+      return;
+    }
+    setUsers((prev) => prev.map((u) => (u.email.toLowerCase() === currentEmail.toLowerCase() ? { ...u, pass: newPw } : u)));
+    setNewPw(""); setNewPw2(""); setShowNewPw(false);
+    setPwMsg({ ok: true, text: "Password updated on this phone" });
+    showToast("Password updated");
+  };
+
+  /* Share link — the online store is built into the app, so the plain app address is enough */
   const appShareUrl =
     typeof window !== "undefined"
-      ? window.location.origin + window.location.pathname + (cfg ? shareHash(cfg) : "")
+      ? window.location.origin + window.location.pathname
       : "Nutrova Doctor Tracker";
   const appShareText = "Nutrova Doctor Tracker — Business Development Manager app for doctors, calls, reminders, purchase orders & payments";
   const handleNativeShare = async () => {
@@ -1098,12 +1416,19 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "auto" });
   };
 
-  /* frozen header shadow + compact mode */
+  /* frozen header shadow only — header height never changes, so no vibration on scroll */
   useEffect(() => {
-    const onScroll = () => setFrozenScrolled(window.scrollY > 8);
+    let raf = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setFrozenScrolled(window.scrollY > 8));
+    };
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      cancelAnimationFrame(raf);
+    };
   }, []);
 
   /* derived */
@@ -1159,7 +1484,7 @@ export default function App() {
     else if (payPendingBucket === "30plus") list = list.filter((p) => p.status !== "paid" && daysOverdue(p.dueDate) > 30);
     /* payment search */
     const q = paySearch.trim().toLowerCase();
-    if (q) list = list.filter((p) => [p.doctorName, p.doctorArea, p.invoiceNo, p.purpose, p.mode, String(p.amount), p.items.map((i) => i.product).join(" ")].join(" ").toLowerCase().includes(q));
+    if (q) list = list.filter((p) => [p.doctorName, p.doctorArea, p.billingName, p.invoiceNo, p.purpose, p.mode, String(p.amount), p.items.map((i) => i.product).join(" ")].join(" ").toLowerCase().includes(q));
     /* sort */
     if (paySort === "mostPending") list.sort((a, b) => daysOverdue(b.dueDate) - daysOverdue(a.dueDate) || a.dueDate.localeCompare(b.dueDate));
     else if (paySort === "amountHigh") list.sort((a, b) => b.amount - a.amount);
@@ -1212,7 +1537,7 @@ export default function App() {
       setQuickArea("");
       return showToast(`Area "${existing.name}" selected`, "info");
     }
-    const np: Patch = { id: uid(), name, color: PATCH_COLORS[patches.length % PATCH_COLORS.length] };
+    const np: Patch = { id: uid(), name, color: "emerald" };
     setPatches((prev) => [...prev, np]);
     setDraft({ patchId: np.id, area: np.name });
     setQuickArea("");
@@ -1349,6 +1674,9 @@ export default function App() {
     if (!r.date) return showToast("Please pick a date", "info");
     if (reminderModal.editing) setReminders((prev) => prev.map((x) => (x.id === r.id ? r : x)));
     else setReminders((prev) => [{ ...r, id: uid() }, ...prev]);
+    dismissedRef.current.delete(r.id);
+    snoozedRef.current.delete(r.id);
+    setRinging((prev) => prev.filter((x) => x.id !== r.id));
     setReminderModal({ open: false, draft: emptyReminder(), editing: false });
     showToast(reminderModal.editing ? "Reminder updated" : "Reminder added");
   };
@@ -1356,6 +1684,7 @@ export default function App() {
   const savePayment = () => {
     const p = paymentModal.draft;
     if (!p.doctorName.trim()) return showToast("Please select a doctor", "info");
+    if (!p.billingName.trim()) return showToast("Billing name is required", "info");
     if (!p.amount || p.amount <= 0) return showToast("Enter a valid amount", "info");
     const status: PaymentStatus = p.status === "paid" ? "paid" : isCriticalOverdue(p.dueDate) ? "overdue" : "pending";
     const cleanItems = (p.items || []).filter((i) => i.product && Number(i.qty) > 0).map((i) => ({ product: i.product, qty: Number(i.qty), rate: Number(i.rate) || 0 }));
@@ -1419,18 +1748,18 @@ export default function App() {
     const dup = patches.find((p) => p.name.toLowerCase() === name.toLowerCase() && p.id !== patchDraft.id);
     if (dup) return showToast(`"${name}" already exists`, "info");
     if (patchDraft.id) {
-      setPatches((prev) => prev.map((p) => (p.id === patchDraft.id ? { ...p, name, color: patchDraft.color } : p)));
+      setPatches((prev) => prev.map((p) => (p.id === patchDraft.id ? { ...p, name } : p)));
       setDoctors((prev) => prev.map((d) => (d.patchId === patchDraft.id ? { ...d, area: name } : d)));
       showToast("Area patch updated");
     } else {
-      setPatches((prev) => [...prev, { id: uid(), name, color: patchDraft.color }]);
+      setPatches((prev) => [...prev, { id: uid(), name, color: "emerald" }]);
       showToast("Area patch created");
     }
-    setPatchDraft({ id: "", name: "", color: "emerald" });
+    setPatchDraft({ id: "", name: "" });
   };
 
   const editPatch = (p: Patch) => {
-    setPatchDraft({ id: p.id, name: p.name, color: p.color });
+    setPatchDraft({ id: p.id, name: p.name });
   };
 
   const deletePatch = (p: Patch) => {
@@ -1457,12 +1786,12 @@ export default function App() {
 
   const exportPayments = () => {
     if (filteredPayments.length === 0) return showToast("No invoices to download", "info");
-    const header = ["PO / Invoice No", "Order Date", "Doctor", "Area", "Products Ordered", "Total Qty", "Note", "Amount (INR)", "Due Date", "Pending Days", "Days Overdue", "Status", "Paid Date", "Mode"];
+    const header = ["PO / Invoice No", "Order Date", "Doctor", "Area", "Billing Name", "Products Ordered", "Total Qty", "Note", "Amount (INR)", "Due Date", "Pending Days", "Days Overdue", "Status", "Paid Date", "Mode"];
     const rows = filteredPayments.map((p) => {
       const st = p.status === "paid" ? "paid" : isCriticalOverdue(p.dueDate) ? "overdue (30+ days)" : isPast(p.dueDate) ? `pending (${daysOverdue(p.dueDate)}d)` : "pending";
       const pend = pendingDaysInfo(p);
       return [
-        p.invoiceNo || "", p.orderDate ? fmtDate(p.orderDate) : "", p.doctorName, p.doctorArea || "",
+        p.invoiceNo || "", p.orderDate ? fmtDate(p.orderDate) : "", p.doctorName, p.doctorArea || "", p.billingName || "",
         p.items.map((i) => `${i.product} x${i.qty} @${i.rate}`).join(" | "), String(orderQty(p.items)), p.purpose, String(p.amount),
         p.dueDate ? fmtDate(p.dueDate) : "", pend.text, String(daysOverdue(p.dueDate)), st,
         p.paidDate ? fmtDate(p.paidDate) : "", p.mode,
@@ -1472,8 +1801,145 @@ export default function App() {
     showToast(`Downloaded ${filteredPayments.length} invoices as CSV`);
   };
 
+  const exportCallsToday = () => {
+    if (callsTodayList.length === 0) return showToast("No calls scheduled today", "info");
+    const header = ["Name", "Specialty", "Clinic", "Area / Patch", "City", "Phone", "Call Time", "Call Days", "Appointment Modes", "Appointment Contact", "Appointment Phone", "Focus Products", "Follow-up Products", "Last Visit", "Notes"];
+    const rows = callsTodayList.map((d) => [
+      d.name, d.specialty, d.clinic || "", patchOf(d.patchId)?.name || d.area || "", d.city || "", d.phone || "",
+      describeTime(d), describeWeekly(d.callDays || []),
+      (d.appointmentModes || []).join(" + "), d.appointmentContact || "", d.appointmentPhone || "",
+      (d.focusProducts || []).join(" + "), (d.followProducts || []).join(" + "),
+      d.lastVisit ? fmtDate(d.lastVisit) : "", d.notes || "",
+    ]);
+    downloadCSV(`nutrova-calls-today-${todayISO()}.csv`, header, rows);
+    showToast(`Downloaded ${callsTodayList.length} calls as CSV`);
+  };
+
+  /* Exchange ?code= / ?token_hash= reset links once on arrival; surface link errors on sign-in */
+  useEffect(() => {
+    if (!urlSignal || !cfg || recoveryExchangeTried.current) return;
+    if (urlSignal.kind === "hash-tokens") return; // handled synchronously, no exchange needed
+    if (urlSignal.kind === "error") {
+      const m = urlSignal.message || "";
+      setAuthError(
+        /expired|invalid|used|denied|otp/i.test(m)
+          ? "Reset link expired or already used — please request a new one"
+          : m
+      );
+      clearUrlAuthParams();
+      return;
+    }
+    recoveryExchangeTried.current = true;
+    setRecoveryExchanging(true);
+    (urlSignal.kind === "code"
+      ? exchangeRecoveryCode(cfg, urlSignal.code)
+      : verifyRecoveryTokenHash(cfg, urlSignal.token_hash)
+    )
+      .then((s) => setRecoverySession(s))
+      .catch((e) => {
+        setAuthError(e instanceof Error ? e.message : "Reset link expired — please request a new one");
+        clearUrlAuthParams();
+      })
+      .finally(() => setRecoveryExchanging(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg]);
+
+  /* Reset URL takes precedence over any older cached sign-in session. */
+  const inRecovery = !recoveryDismissed && (!!urlSignal || !!recoveryTokens || !!recoverySession || recoveryExchanging);
+
   /* ---------------- Option B login gate — show/hide + create account + stay logged in ---------------- */
-  if (!signedIn) {
+  if (!signedIn || inRecovery) {
+    /* Arrived here from a password-reset email link → set a new password */
+    if (inRecovery && urlSignal?.kind === "error") {
+      const expired = /expired|invalid|used|otp/i.test(urlSignal.message || "");
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
+          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+            <div className="bg-emerald-950 px-6 py-6 text-white sm:px-8">
+              <div className="flex items-center gap-3">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-rose-500/20 ring-1 ring-rose-400/40">
+                  <Lock className="h-6 w-6 text-rose-200" />
+                </div>
+                <div>
+                  <p className="text-lg font-extrabold leading-tight">Reset link couldn't be used</p>
+                  <p className="text-xs text-emerald-200/80">Nutrova Doctor Tracker</p>
+                </div>
+              </div>
+            </div>
+            <div className="space-y-4 p-6 sm:p-8">
+              <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm font-semibold leading-relaxed text-rose-800 ring-1 ring-rose-200">
+                {expired
+                  ? "This reset link has expired, was already used, or did not complete Supabase verification. Request a fresh link and open it on the same phone/browser."
+                  : urlSignal.message || "The reset link is not valid."}
+              </p>
+              <ol className="space-y-1.5 text-xs font-medium leading-relaxed text-slate-500">
+                <li>1. Return to sign in and tap “Forgot password?”.</li>
+                <li>2. Request a new email, then open the newest link on this device.</li>
+                <li>3. If the link keeps returning here, check Supabase Authentication → URL Configuration includes this app's exact address.</li>
+              </ol>
+              <button onClick={cancelRecovery} className="w-full rounded-2xl bg-emerald-700 py-3 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800">
+                Return to sign in
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    if (inRecovery) {
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
+          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+            <div className="bg-emerald-950 px-6 pb-6 pt-7 text-white sm:px-8 sm:pt-8">
+              <div className="flex items-center gap-3">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/20 ring-1 ring-emerald-400/40">
+                  <Lock className="h-6 w-6 text-emerald-300" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-lg font-extrabold leading-tight">{recoveryExchanging && !recoveryTokens && !recoverySession ? "Verifying reset link…" : "Set new password"}</p>
+                  <p className="text-xs text-emerald-200/80">Password reset · Nutrova Doctor Tracker</p>
+                </div>
+              </div>
+            </div>
+            {recoveryExchanging && !recoveryTokens && !recoverySession ? (
+              <div className="flex flex-col items-center gap-3 px-6 py-10 sm:px-8">
+                <RefreshCcw className="h-8 w-8 animate-spin text-emerald-600" />
+                <p className="text-sm font-bold text-slate-600">Verifying reset link…</p>
+              </div>
+            ) : (
+            <div className="space-y-4 px-6 py-6 sm:px-8 sm:py-7">
+              <div>
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">New password</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <input type={showRecoveryPw ? "text" : "password"} value={recoveryPw} onChange={(e) => setRecoveryPw(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="6+ characters" autoComplete="new-password" />
+                  <button type="button" onClick={() => setShowRecoveryPw(!showRecoveryPw)} title={showRecoveryPw ? "Hide password" : "Show password"} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-emerald-700">
+                    {showRecoveryPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Confirm new password</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <input type={showRecoveryPw ? "text" : "password"} value={recoveryPw2} onChange={(e) => setRecoveryPw2(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSetNewPassword()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="Repeat new password" autoComplete="new-password" />
+                </div>
+              </div>
+              {authError && <p className="rounded-xl bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{authError}</p>}
+              {recoveryExchanging && !recoveryTokens && !recoverySession && (
+                <p className="rounded-xl bg-sky-50 px-4 py-2.5 text-center text-xs font-bold text-sky-800 ring-1 ring-sky-100">
+                  Connecting this reset email to your account. Please keep this page open.
+                </p>
+              )}
+              <button onClick={handleSetNewPassword} disabled={recovering || recoveryExchanging || (!recoveryTokens && !recoverySession)} className="w-full rounded-2xl bg-emerald-700 py-3.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99] disabled:opacity-60">
+                {recoveryExchanging || recovering ? "Please wait…" : "Update password & Sign in"}
+              </button>
+              <button onClick={cancelRecovery} className="w-full text-center text-xs font-bold text-slate-400 underline-offset-2 hover:text-slate-600 hover:underline">
+                Cancel — back to sign in
+              </button>
+            </div>
+            )}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
         <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
@@ -1504,17 +1970,11 @@ export default function App() {
             </div>
           </div>
 
-          {/* online store status */}
+          {/* online store status — connection is built in and locked */}
           <div className="px-6 pt-4 sm:px-8">
-            {online ? (
-              <p className="flex items-center gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-extrabold text-emerald-800 ring-1 ring-emerald-100">
-                <Cloud className="h-4 w-4 shrink-0" /> Online store connected — your data is saved in the cloud
-              </p>
-            ) : (
-              <button onClick={() => setSetupOpen(true)} className="flex w-full items-center gap-2 rounded-xl bg-amber-50 px-3 py-2 text-left text-[11px] font-extrabold text-amber-900 ring-1 ring-amber-200 transition hover:bg-amber-100">
-                <CloudOff className="h-4 w-4 shrink-0" /> Online store not connected — tap to set up (owner, one time)
-              </button>
-            )}
+            <p className="flex items-center gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-extrabold text-emerald-800 ring-1 ring-emerald-100">
+              <Cloud className="h-4 w-4 shrink-0" /> Online store connected — your data is saved in the cloud
+            </p>
           </div>
 
           {authMode === "login" ? (
@@ -1535,6 +1995,11 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              <div className="flex justify-end">
+                <button onClick={() => { setAuthMode("forgot"); setAuthError(""); setAuthInfo(""); setForgotSent(false); }} className="text-xs font-bold text-emerald-700 underline-offset-2 hover:underline">
+                  Forgot password?
+                </button>
+              </div>
               {authInfo && <p className="rounded-xl bg-emerald-50 px-4 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-200">{authInfo}</p>}
               {authError && <p className="rounded-xl bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{authError}</p>}
               <button onClick={handleLogin} disabled={authBusy} className="w-full rounded-2xl bg-emerald-700 py-3.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99] disabled:opacity-60">
@@ -1548,7 +2013,7 @@ export default function App() {
               </button>
               <p className="text-center text-xs text-slate-400">Secure workspace for Nutrova field team</p>
             </div>
-          ) : (
+          ) : authMode === "signup" ? (
             <div className="space-y-4 px-6 py-6 sm:px-8 sm:py-7">
               <div>
                 <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Full name</label>
@@ -1595,6 +2060,35 @@ export default function App() {
                 {online ? "Your account and data are saved securely in the online store." : "Online store not connected — account saves on this phone only."}
               </p>
             </div>
+          ) : (
+            <div className="space-y-4 px-6 py-6 sm:px-8 sm:py-7">
+              <div>
+                <p className="text-base font-extrabold text-slate-900">Forgot password?</p>
+                <p className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
+                  Enter your account email — we'll send a reset link. Open it on this phone to set a new password.
+                </p>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Account email</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <Mail className="h-4 w-4 shrink-0 text-emerald-600" />
+                  <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleForgotPassword()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" autoComplete="email" />
+                </div>
+              </div>
+              {authInfo && <p className="rounded-xl bg-emerald-50 px-4 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-200">{authInfo}</p>}
+              {authError && <p className="rounded-xl bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{authError}</p>}
+              <button onClick={handleForgotPassword} disabled={authBusy} className="w-full rounded-2xl bg-emerald-700 py-3.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99] disabled:opacity-60">
+                {authBusy ? "Sending…" : forgotSent ? "Resend reset link" : "Send reset link"}
+              </button>
+              {forgotSent && (
+                <p className="rounded-xl bg-amber-50 px-4 py-2.5 text-center text-[11px] font-bold leading-relaxed text-amber-800 ring-1 ring-amber-100">
+                  No email yet? Check the spam folder, then tap Resend.
+                </p>
+              )}
+              <button onClick={() => { setAuthMode("login"); setAuthError(""); setAuthInfo(""); }} className="w-full text-center text-xs font-bold text-emerald-700 underline-offset-2 hover:underline">
+                Back to sign in
+              </button>
+            </div>
           )}
         </div>
         {shareOpen && (
@@ -1606,14 +2100,6 @@ export default function App() {
             onClose={() => setShareOpen(false)}
             onNative={handleNativeShare}
             onCopy={handleCopyLink}
-          />
-        )}
-        {setupOpen && (
-          <SetupDialog
-            cfg={cfg}
-            onClose={() => setSetupOpen(false)}
-            onSave={(c) => { saveConfig(c); setCfg(c); setSession(null); setSetupOpen(false); showToast("Online store connected"); }}
-            onDisconnect={() => { clearConfig(); setCfg(null); setSession(null); setRemote(null); setSetupOpen(false); showToast("Disconnected — using this phone only", "info"); }}
           />
         )}
         {toast && (
@@ -1632,10 +2118,13 @@ export default function App() {
 
   const navItems: { id: Tab; label: string }[] = [
     { id: "dashboard", label: "Dashboard" },
-    { id: "doctors", label: "Doctors" },
-    { id: "reminders", label: "Reminders" },
-    { id: "payments", label: "Payments" },
-    { id: "bio", label: "Bio" },
+  ];
+  const drawerItems: { id: Tab; label: string; icon: ReactNode }[] = [
+    { id: "doctors", label: "Doctors", icon: <Stethoscope className="h-5 w-5" /> },
+    { id: "reminders", label: "Reminders", icon: <Bell className="h-5 w-5" /> },
+    { id: "payments", label: "Payments", icon: <Wallet className="h-5 w-5" /> },
+    { id: "bio", label: "Bio", icon: <User className="h-5 w-5" /> },
+    { id: "settings", label: "Settings", icon: <SettingsIcon className="h-5 w-5" /> },
   ];
 
   return (
@@ -1643,17 +2132,17 @@ export default function App() {
       {/* --------------------- FROZEN: top banner + nav pills (upto marked line) --------------------- */}
       <div className={`sticky top-0 z-40 transition-shadow duration-200 ${frozenScrolled ? "shadow-lg shadow-slate-900/10" : ""}`}>
         <header className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-800 text-white">
-          <div className={`mx-auto flex max-w-7xl items-start justify-between gap-3 px-4 transition-all duration-200 sm:px-8 ${frozenScrolled ? "py-2.5" : "py-4 sm:py-5"}`}>
+          <div className="mx-auto flex max-w-7xl items-start justify-between gap-3 px-4 sm:px-8 py-4 sm:py-5">
             <div className="flex min-w-0 flex-1 items-start gap-2.5 sm:gap-3">
-              <div className={`mt-0.5 flex shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/15 transition-all duration-200 ${frozenScrolled ? "h-9 w-9" : "h-10 w-10 sm:h-11 sm:w-11"}`}>
-                <Stethoscope className={`${frozenScrolled ? "h-5 w-5" : "h-5 w-5 sm:h-6 sm:w-6"} text-emerald-300`} />
+              <div className="mt-0.5 flex h-10 w-10 sm:h-11 sm:w-11 shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/15">
+                <Stethoscope className="h-5 w-5 sm:h-6 sm:w-6 text-emerald-300" />
               </div>
               <div className="min-w-0 flex-1">
-                <h1 className={`font-extrabold leading-tight tracking-tight transition-all duration-200 ${frozenScrolled ? "text-[15px] sm:text-lg" : "text-[17px] sm:text-2xl"}`}>
+                <h1 className="font-extrabold leading-tight tracking-tight text-[17px] sm:text-2xl">
                   Nutrova Doctor Tracker
                 </h1>
                 {/* tagline — always fully visible, wraps to 2 lines on mobile instead of cutting */}
-                <p className={`text-emerald-100/90 transition-all duration-200 ${frozenScrolled ? "mt-0.5 text-[11px] leading-snug sm:text-xs" : "mt-1 text-xs leading-snug sm:text-sm"}`}>
+                <p className="text-emerald-100/90 mt-1 text-xs leading-snug sm:text-sm">
                   Created by <span className="font-bold text-white underline decoration-emerald-300/60 underline-offset-2">{bio.name || "—"}</span>
                   <span className="mx-1.5 text-emerald-300/60">·</span><span className="whitespace-nowrap">{bio.role || "Business Development Manager"}</span>
                   <span className="mx-1.5 text-emerald-300/60">·</span><span className="font-bold text-white">Nutrova</span>
@@ -1665,18 +2154,18 @@ export default function App() {
                 <Mail className="h-4 w-4 shrink-0 text-emerald-300" />
                 <span className="max-w-[180px] truncate">{sessionEmail || bio.email || "—"}</span>
               </span>
-              <button onClick={() => setShareOpen(true)} title="Share this app with others" className={`flex shrink-0 items-center gap-1.5 rounded-full bg-amber-400 font-extrabold text-amber-950 shadow transition hover:bg-amber-300 sm:gap-2 sm:text-sm ${frozenScrolled ? "px-3 py-1.5 text-xs sm:px-4" : "px-3.5 py-2 text-xs sm:px-4 sm:py-2.5 sm:text-sm"}`}>
+              <button onClick={() => setShareOpen(true)} title="Share this app with others" className="flex shrink-0 items-center gap-1.5 rounded-full bg-amber-400 font-extrabold text-amber-950 shadow transition hover:bg-amber-300 sm:gap-2 sm:text-sm px-3.5 py-2 text-xs sm:px-4 sm:py-2.5 sm:text-sm">
                 <Share2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> <span className="hidden sm:inline">Share</span>
               </button>
-              <button onClick={handleSignOut} className={`flex shrink-0 items-center gap-1.5 rounded-full bg-white/10 font-bold text-white ring-1 ring-white/15 transition hover:bg-white/20 sm:gap-2 sm:text-sm ${frozenScrolled ? "px-3 py-1.5 text-xs sm:px-4" : "px-3.5 py-2 text-xs sm:px-5 sm:py-2.5 sm:text-sm"}`}>
+              <button onClick={handleSignOut} className="flex shrink-0 items-center gap-1.5 rounded-full bg-white/10 font-bold text-white ring-1 ring-white/15 transition hover:bg-white/20 sm:gap-2 sm:text-sm px-3.5 py-2 text-xs sm:px-5 sm:py-2.5 sm:text-sm">
                 <LogOut className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> Sign out
               </button>
             </div>
           </div>
         </header>
 
-        <nav className={`border-b border-slate-200 bg-white/95 backdrop-blur transition-all duration-200 ${frozenScrolled ? "shadow-sm" : ""}`}>
-          <div className={`mx-auto flex max-w-7xl items-center gap-2 overflow-x-auto px-5 sm:px-8 no-scrollbar ${frozenScrolled ? "py-2" : "py-3"}`}>
+        <nav className={`border-b border-slate-200 bg-white/95 backdrop-blur transition-shadow duration-200 ${frozenScrolled ? "shadow-sm" : ""}`}>
+          <div className="mx-auto flex max-w-7xl items-center gap-2 px-5 sm:px-8 py-3">
             {navItems.map((n) => (
               <button
                 key={n.id}
@@ -1690,24 +2179,71 @@ export default function App() {
                 {n.label}
               </button>
             ))}
-            <div className="ml-auto hidden items-center gap-2 text-xs font-semibold text-slate-400 md:flex">
-              <span className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-emerald-700 ring-1 ring-emerald-100">
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <span className="hidden items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-100 lg:flex">
                 <span className="h-2 w-2 rounded-full bg-emerald-500 anim-pulse-soft" />
                 {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}
               </span>
+              {/* Hamburger — Doctors / Reminders / Payments / Bio / Settings live here */}
+              <button
+                onClick={() => setMenuOpen(true)}
+                title="Open menu"
+                aria-label="Open menu"
+                className="flex shrink-0 items-center gap-1.5 rounded-full bg-slate-900 px-4 py-2 text-sm font-bold text-white transition hover:bg-slate-700"
+              >
+                <Menu className="h-4 w-4" />
+                <span className="hidden sm:inline">Menu</span>
+              </button>
             </div>
           </div>
         </nav>
       </div>
 
+      {/* Hamburger slide menu — all tabs except Dashboard */}
+      {menuOpen && (
+        <div className="fixed inset-0 z-50">
+          <div className="absolute inset-0 bg-slate-950/50" onClick={() => setMenuOpen(false)} />
+          <aside className="absolute right-0 top-0 flex h-full w-72 max-w-[85vw] flex-col bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <p className="text-base font-extrabold text-slate-900">Menu</p>
+              <button onClick={() => setMenuOpen(false)} aria-label="Close menu" className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-600 transition hover:bg-slate-200">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 space-y-1 overflow-y-auto p-3">
+              {drawerItems.map((d) => (
+                <button
+                  key={d.id}
+                  onClick={() => { setMenuOpen(false); goTo(d.id); }}
+                  className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm font-bold transition ${
+                    activeTab === d.id ? "bg-emerald-700 text-white shadow" : "text-slate-700 hover:bg-slate-100"
+                  }`}
+                >
+                  {d.icon}
+                  {d.label}
+                  {d.id === "doctors" && (
+                    <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-extrabold ${activeTab === d.id ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{doctors.length}</span>
+                  )}
+                  {d.id === "reminders" && (
+                    <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-extrabold ${activeTab === d.id ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{reminders.filter((r) => !r.done).length}</span>
+                  )}
+                  {d.id === "payments" && (
+                    <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-extrabold ${activeTab === d.id ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{pendingPayments.length}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            <div className="border-t border-slate-200 p-4">
+              <button onClick={() => { setMenuOpen(false); handleSignOut(); }} className="flex w-full items-center justify-center gap-2 rounded-xl border border-rose-200 bg-rose-50 py-2.5 text-sm font-extrabold text-rose-600 transition hover:bg-rose-100">
+                <LogOut className="h-4 w-4" /> Sign out
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+
       <main className="mx-auto max-w-7xl px-5 py-8 sm:px-8">
         {/* online store status banner — only shown when something needs attention */}
-        {!online && (
-          <button onClick={() => setSetupOpen(true)} className="mb-5 flex w-full items-center gap-2.5 rounded-2xl bg-amber-50 px-4 py-3 text-left text-xs font-bold text-amber-900 ring-1 ring-amber-200 transition hover:bg-amber-100">
-            <CloudOff className="h-4 w-4 shrink-0" />
-            <span>Online store not connected — data is saved on this phone only. <span className="underline">Tap to connect</span></span>
-          </button>
-        )}
         {online && syncState === "loading" && (
           <p className="mb-5 flex items-center gap-2.5 rounded-2xl bg-slate-50 px-4 py-3 text-xs font-bold text-slate-600 ring-1 ring-slate-200">
             <Cloud className="h-4 w-4 shrink-0 anim-pulse-soft" /> Loading your data from the online store…
@@ -1717,8 +2253,8 @@ export default function App() {
           <div className="mb-5 flex flex-wrap items-center gap-2.5 rounded-2xl bg-rose-50 px-4 py-3 text-xs font-bold text-rose-800 ring-1 ring-rose-200">
             <CloudOff className="h-4 w-4 shrink-0" />
             <span className="min-w-0 flex-1">{syncError || "Online store problem"}</span>
-            <button onClick={() => setRetryTick((n) => n + 1)} className="rounded-full bg-rose-600 px-3 py-1 text-white hover:bg-rose-700">Retry</button>
-            <button onClick={() => setSetupOpen(true)} className="rounded-full bg-white px-3 py-1 text-rose-700 ring-1 ring-rose-200 hover:bg-rose-50">Setup</button>
+            <button onClick={syncNow} disabled={syncBusy} className="rounded-full bg-rose-600 px-3 py-1 text-white hover:bg-rose-700 disabled:opacity-60">{syncBusy ? "Syncing…" : "Retry"}</button>
+            <button onClick={() => goTo("settings")} className="rounded-full bg-white px-3 py-1 text-rose-700 ring-1 ring-rose-200 hover:bg-rose-50">Settings</button>
           </div>
         )}
         {/* ------------------------------- dashboard ------------------------------ */}
@@ -1732,14 +2268,19 @@ export default function App() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-widest text-emerald-700">
-                    <CalendarClock className="h-4 w-4" /> Giving calls today · by OPD schedule
+                    <CalendarClock className="h-4 w-4" /> Giving calls today
                   </p>
                   <p className="mt-1 text-sm font-medium text-slate-500">
-                    Auto-matched from each doctor's weekly call days + monthly rules ({new Date().toLocaleDateString("en-IN", { weekday: "long" })}).
+                    {isAndroidPhone
+                      ? `Auto-matched · ${new Date().toLocaleDateString("en-IN", { weekday: "long" })}`
+                      : `Auto-matched from each doctor's weekly call days + monthly rules (${new Date().toLocaleDateString("en-IN", { weekday: "long" })}).`}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="rounded-full bg-emerald-700 px-4 py-1.5 text-sm font-extrabold text-white">{callsTodayList.length} doctors</span>
+                  <button onClick={exportCallsToday} title="Download today's calls as CSV" className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-4 py-1.5 text-xs font-extrabold text-emerald-700 transition hover:bg-emerald-50">
+                    <Download className="h-3.5 w-3.5" /> Download
+                  </button>
                   <button onClick={() => { setCallsTodayOnly(true); setPatchFilter("all"); goTo("doctors"); }} className="rounded-full border border-emerald-200 bg-white px-4 py-1.5 text-xs font-extrabold text-emerald-700 transition hover:bg-emerald-50">
                     View all
                   </button>
@@ -1797,7 +2338,9 @@ export default function App() {
                     <Wallet className="h-4 w-4" /> Payment pending days
                   </p>
                   <p className="mt-1 text-sm font-medium text-slate-500">
-                    Red = pending 30+ days · below 30 days normal colour · most overdue first
+                    {isAndroidPhone
+                      ? "Red = 30+ days · most overdue first"
+                      : "Red = pending 30+ days · below 30 days normal colour · most overdue first"}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -1880,7 +2423,7 @@ export default function App() {
         {activeTab === "bio" && (
         <section id="bio" key="tab-bio" className="anim-fade-up">
           <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Bio</h2>
-          <p className="mt-1 text-sm font-medium text-slate-500">Short employee profile · shown in banner and footer</p>
+          <p className="mt-1 text-sm font-medium text-slate-500">{isAndroidPhone ? "Profile · in banner + footer" : "Short employee profile · shown in banner and footer"}</p>
 
           <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-[360px_1fr]">
             {/* short bio ID card */}
@@ -1904,9 +2447,9 @@ export default function App() {
                 <p className="flex items-center gap-2.5 font-medium text-slate-700"><Phone className="h-4 w-4 shrink-0 text-emerald-600" /> {bio.phone || "Phone not set"}</p>
                 <p className="flex items-center gap-2.5 font-medium text-slate-700"><Mail className="h-4 w-4 shrink-0 text-emerald-600" /> <a href={`mailto:${bio.email}`} className="truncate underline decoration-slate-200 underline-offset-2 hover:text-emerald-700">{bio.email || "—"}</a></p>
                 <p className="flex items-center gap-2.5 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100"><Check className="h-4 w-4 shrink-0" /> Signed in as {currentEmail || bio.email} · stays until Sign out</p>
-                <button onClick={() => setSetupOpen(true)} className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-extrabold ring-1 transition ${online ? (syncState === "error" ? "bg-rose-50 text-rose-800 ring-rose-200" : "bg-sky-50 text-sky-800 ring-sky-100 hover:bg-sky-100") : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"}`}>
+                <button onClick={() => goTo("settings")} className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-extrabold ring-1 transition ${online ? (syncState === "error" ? "bg-rose-50 text-rose-800 ring-rose-200" : "bg-sky-50 text-sky-800 ring-sky-100 hover:bg-sky-100") : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"}`}>
                   {online ? <Cloud className="h-4 w-4 shrink-0" /> : <CloudOff className="h-4 w-4 shrink-0" />}
-                  {online ? (syncState === "error" ? "Online store — problem, tap for details" : syncState === "loading" ? "Online store — syncing…" : "Online store connected · data synced") : "Online store not connected — tap to set up"}
+                  {online ? (syncState === "error" ? "Online store — problem, open Settings" : syncState === "loading" ? "Online store — syncing…" : "Online store connected · data synced") : "Online store not connected"}
                 </button>
                 <div className="grid grid-cols-2 gap-2">
                   <button onClick={() => setShareOpen(true)} className="flex items-center justify-center gap-1.5 rounded-xl bg-amber-400 py-2.5 text-xs font-extrabold text-amber-950 transition hover:bg-amber-300">
@@ -1966,7 +2509,7 @@ export default function App() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Doctors</h2>
-              <p className="mt-1 text-sm font-medium text-slate-500">{doctors.length} doctors · {patches.length} area patches · <span className="font-bold text-slate-600">Red = 30+ days overdue only</span></p>
+              <p className="mt-1 text-sm font-medium text-slate-500">{isAndroidPhone ? <>{doctors.length} doctors · {patches.length} patches · <span className="font-bold text-slate-600">Red = 30+ days</span></> : <>{doctors.length} doctors · {patches.length} area patches · <span className="font-bold text-slate-600">Red = 30+ days overdue only</span></>}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button onClick={exportDoctors} title={`Download ${filteredDoctors.length} doctors as CSV`} className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-extrabold text-emerald-800 shadow-sm transition hover:bg-emerald-100">
@@ -2001,7 +2544,7 @@ export default function App() {
                   No patch · {doctors.filter((d) => !d.patchId).length}
                 </button>
               </div>
-              <button onClick={() => { setPatchDraft({ id: "", name: "", color: "emerald" }); setPatchModal(true); }} className="ml-auto flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-4 py-1.5 text-xs font-extrabold text-emerald-700 transition hover:bg-emerald-50">
+              <button onClick={() => { setPatchDraft({ id: "", name: "" }); setPatchModal(true); }} className="ml-auto flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-4 py-1.5 text-xs font-extrabold text-emerald-700 transition hover:bg-emerald-50">
                 <Plus className="h-3.5 w-3.5" /> Manage patches
               </button>
             </div>
@@ -2031,7 +2574,7 @@ export default function App() {
           <div className="mt-4 flex flex-col gap-3 lg:flex-row">
             <div className="flex flex-1 items-center gap-2.5 rounded-2xl border border-emerald-200 bg-white px-4 py-3 shadow-sm transition focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
               <Search className="h-5 w-5 shrink-0 text-emerald-600" />
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search doctor / area / specialty / product / appointment" className="w-full bg-transparent text-[15px] font-medium text-slate-800 outline-none placeholder:text-slate-400" />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={isAndroidPhone ? "Search doctors…" : "Search doctor / area / specialty / product / appointment"} className="w-full bg-transparent text-[15px] font-medium text-slate-800 outline-none placeholder:text-slate-400" />
               {search && <button onClick={() => setSearch("")} className="rounded-full p-1 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
             </div>
             <div className="flex flex-col gap-3 sm:flex-row">
@@ -2199,6 +2742,13 @@ export default function App() {
                         );
                       })()}
                       {(() => {
+                        if (!d.nextVisit) {
+                          return (
+                            <span title="No next visit planned — edit the doctor to set a date" className="rounded-lg px-2.5 py-1.5 bg-slate-100 text-slate-500">
+                              Next: Not planned
+                            </span>
+                          );
+                        }
                         const od = daysOverdue(d.nextVisit);
                         const critical = od > 30;
                         const past = od > 0;
@@ -2248,9 +2798,11 @@ export default function App() {
               <button onClick={() => setReminderModal({ open: true, draft: emptyReminder(), editing: false })} className="flex items-center gap-1.5 rounded-full bg-emerald-700 px-5 py-2 text-sm font-extrabold text-white shadow-md shadow-emerald-200 transition hover:bg-emerald-800">
                 <Plus className="h-4 w-4" /> Add Reminder
               </button>
+              <button onClick={alertsOn ? testAlarmSound : enableAlerts} title={alertsOn ? "Play test sound" : "Turn on sound + phone notifications for reminders"} className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-extrabold shadow-sm transition ${alertsOn ? "border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100" : "bg-amber-400 text-amber-950 shadow-md shadow-amber-200 hover:bg-amber-300"}`}>
+                {alertsOn ? <Volume2 className="h-4 w-4" /> : <BellRing className="h-4 w-4" />} {alertsOn ? "Test sound" : "Enable alerts"}
+              </button>
             </div>
           </div>
-
           <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-2">
             {filteredReminders.length === 0 && (
               <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center lg:col-span-2">
@@ -2266,12 +2818,6 @@ export default function App() {
               const area = r.doctorArea || doctorByName(r.doctorName)?.area || "";
               return (
                 <div key={r.id} className={`flex gap-3.5 rounded-3xl border p-4 shadow-sm transition ${r.done ? "border-slate-200 bg-slate-50/70" : critical ? "border-rose-300 bg-rose-50/60" : overdue ? "border-amber-200 bg-amber-50/40" : "border-slate-200 bg-white hover:border-emerald-200 hover:shadow-md"}`}>
-                  <button
-                    onClick={() => { setReminders((p) => p.map((x) => (x.id === r.id ? { ...x, done: !x.done } : x))); if (!r.done) showToast("Reminder completed"); }}
-                    className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 transition ${r.done ? "border-emerald-600 bg-emerald-600 text-white" : "border-slate-300 text-transparent hover:border-emerald-500"}`}
-                  >
-                    <Check className="h-4 w-4" strokeWidth={3} />
-                  </button>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`rounded-full border px-2.5 py-0.5 text-[11px] font-extrabold ${KIND_COLORS[r.kind]}`}>{r.kind}</span>
@@ -2279,6 +2825,7 @@ export default function App() {
                       {critical && <span className="rounded-full bg-rose-600 px-2.5 py-0.5 text-[11px] font-extrabold text-white">Overdue · {od}d</span>}
                       {overdue && !critical && <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-extrabold text-amber-800 ring-1 ring-amber-200">Overdue · {od}d</span>}
                       {r.done && <span className="rounded-full bg-slate-200 px-2.5 py-0.5 text-[11px] font-extrabold text-slate-600">Done</span>}
+                      {r.alarm !== false && !r.done && <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-extrabold text-amber-800 ring-1 ring-amber-200"><AlarmClock className="h-3 w-3" />Alarm</span>}
                       {area && <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-extrabold text-slate-600"><MapPin className="h-3 w-3" />{area}</span>}
                     </div>
                     <p className={`mt-1.5 text-[15px] font-extrabold ${r.done ? "text-slate-400 line-through" : "text-slate-900"}`}>{r.title}</p>
@@ -2290,6 +2837,16 @@ export default function App() {
                     {r.notes && <p className="mt-1.5 text-[13px] font-medium text-slate-500">{r.notes}</p>}
                   </div>
                   <div className="flex shrink-0 flex-col gap-1.5">
+                    {!r.done && (
+                      <div className="flex gap-1.5">
+                        <button onClick={() => { dismissedRef.current.add(r.id); setReminders((p) => p.map((x) => (x.id === r.id ? { ...x, done: true } : x))); showToast("Reminder completed"); }} title="Mark completed" className="flex h-9 items-center gap-1 rounded-xl bg-emerald-700 px-3 text-xs font-extrabold text-white transition hover:bg-emerald-800">
+                          <Check className="h-3.5 w-3.5" /> Done
+                        </button>
+                        <button onClick={() => { setReminderModal({ open: true, draft: { ...r }, editing: true }); }} title="Postpone to another date" className="flex h-9 items-center gap-1 rounded-xl border border-amber-200 bg-amber-50 px-3 text-xs font-extrabold text-amber-800 transition hover:bg-amber-100">
+                          <CalendarClock className="h-3.5 w-3.5" /> Postpone
+                        </button>
+                      </div>
+                    )}
                     <IconBtn title="Edit" onClick={() => setReminderModal({ open: true, draft: { ...r }, editing: true })}><Pencil className="h-4 w-4" /></IconBtn>
                     <IconBtn title="Delete" danger onClick={() => deleteReminder(r)}><Trash2 className="h-4 w-4" /></IconBtn>
                   </div>
@@ -2306,7 +2863,7 @@ export default function App() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Payments</h2>
-              <p className="mt-1 text-sm font-medium text-slate-500">Purchase orders of Nutrova products · <span className="font-bold text-slate-600">Red = pending 30+ days only</span> · below 30 days shows normal colour</p>
+              <p className="mt-1 text-sm font-medium text-slate-500">{isAndroidPhone ? <>Purchase orders · <span className="font-bold text-slate-600">Red = 30+ days</span></> : <>Purchase orders of Nutrova products · <span className="font-bold text-slate-600">Red = pending 30+ days only</span> · below 30 days shows normal colour</>}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex items-center rounded-full bg-slate-100 p-1">
@@ -2370,7 +2927,7 @@ export default function App() {
             <div className="mt-3 flex flex-col gap-2 border-t border-slate-200/70 pt-3 sm:flex-row">
               <div className="flex flex-1 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 shadow-sm focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
                 <Search className="h-4 w-4 shrink-0 text-slate-400" />
-                <input value={paySearch} onChange={(e) => setPaySearch(e.target.value)} placeholder="Search PO no / doctor / area / product / amount" className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
+                <input value={paySearch} onChange={(e) => setPaySearch(e.target.value)} placeholder={isAndroidPhone ? "Search orders…" : "Search PO no / doctor / area / product / amount"} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
                 {paySearch && <button onClick={() => setPaySearch("")} className="rounded-full p-1 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
               </div>
               <select value={paySort} onChange={(e) => setPaySort(e.target.value as typeof paySort)} title="Sort invoices" className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500">
@@ -2396,6 +2953,7 @@ export default function App() {
                     <th className="border-r border-slate-700 px-3 py-3">PO / Invoice no</th>
                     <th className="border-r border-slate-700 px-3 py-3">Order date</th>
                     <th className="border-r border-slate-700 px-3 py-3">Doctor</th>
+                    <th className="border-r border-slate-700 px-3 py-3">Billing name</th>
                     <th className="border-r border-slate-700 px-3 py-3">Products ordered</th>
                     <th className="border-r border-slate-700 px-3 py-3 text-right">Qty</th>
                     <th className="border-r border-slate-700 px-3 py-3 text-right">Amount</th>
@@ -2408,7 +2966,7 @@ export default function App() {
                 <tbody>
                   {filteredPayments.length === 0 && (
                     <tr>
-                      <td colSpan={11} className="p-10 text-center">
+                      <td colSpan={12} className="p-10 text-center">
                         <Wallet className="mx-auto h-10 w-10 text-slate-300" />
                         <p className="mt-3 font-extrabold text-slate-700">No purchase orders here</p>
                         <p className="mt-1 text-xs font-semibold text-slate-400">Tap “New Purchase Order” to add the products a doctor ordered.</p>
@@ -2429,13 +2987,14 @@ export default function App() {
                           <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1 font-mono text-xs font-extrabold ${critical ? "bg-rose-100 text-rose-800" : "bg-slate-100 text-slate-700"}`}>
                             <FileText className={`h-3.5 w-3.5 ${critical ? "text-rose-500" : "text-slate-400"}`} />{p.invoiceNo || "—"}
                           </span>
-                          <p className="mt-1 text-[11px] font-semibold text-slate-400">{p.mode}</p>
+                          {p.mode && <p className="mt-1 text-[11px] font-semibold text-slate-400">{p.mode}</p>}
                         </td>
                         <td className={`${cell} whitespace-nowrap text-xs font-bold text-slate-600`}>{p.orderDate ? fmtDate(p.orderDate) : "—"}</td>
                         <td className={cell}>
                           <p className="font-extrabold text-slate-900">{p.doctorName}</p>
                           <p className="flex items-center gap-1 text-[11px] font-semibold text-slate-400"><MapPin className="h-3 w-3" />{p.doctorArea || "—"}</p>
                         </td>
+                        <td className={`${cell} text-xs font-bold text-slate-700`}>{p.billingName || <span className="font-semibold italic text-slate-400">—</span>}</td>
                         <td className={`${cell} min-w-[250px]`}>
                           {p.items.length > 0 ? (
                             <ul className="space-y-1">
@@ -2485,7 +3044,7 @@ export default function App() {
                 {filteredPayments.length > 0 && (
                   <tfoot>
                     <tr className="border-t-2 border-slate-300 bg-slate-100 text-sm font-extrabold text-slate-800">
-                      <td colSpan={5} className="border-r border-slate-200 px-3 py-3 text-right text-xs uppercase tracking-wider text-slate-500">Total · {filteredPayments.length} purchase order{filteredPayments.length !== 1 ? "s" : ""}</td>
+                      <td colSpan={6} className="border-r border-slate-200 px-3 py-3 text-right text-xs uppercase tracking-wider text-slate-500">Total · {filteredPayments.length} purchase order{filteredPayments.length !== 1 ? "s" : ""}</td>
                       <td className="border-r border-slate-200 px-3 py-3 text-right">{filteredPayments.reduce((s, p) => s + orderQty(p.items), 0)}</td>
                       <td className="border-r border-slate-200 px-3 py-3 text-right text-base">{inr(filteredPayments.reduce((s, p) => s + p.amount, 0))}</td>
                       <td colSpan={4} className="px-3 py-3 text-xs font-bold text-slate-500">{inr(filteredPayments.filter((p) => p.status !== "paid").reduce((s, p) => s + p.amount, 0))} still pending</td>
@@ -2493,6 +3052,170 @@ export default function App() {
                   </tfoot>
                 )}
               </table>
+            </div>
+          </div>
+        </section>
+        )}
+
+        {/* -------------------------------- settings ------------------------------- */}
+        {activeTab === "settings" && (
+        <section id="settings" key="tab-settings" className="anim-fade-up">
+          <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Settings</h2>
+          <p className="mt-1 text-sm font-medium text-slate-500">Account, online store and app</p>
+
+          <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
+            {/* ---------- Account ---------- */}
+            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
+                <User className="h-4 w-4 text-emerald-600" />
+                <p className="text-xs font-extrabold uppercase tracking-widest text-slate-600">Account</p>
+              </div>
+              <div className="space-y-4 p-5 sm:p-6">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-700 text-sm font-extrabold text-white">{initials(bio.name || "User")}</div>
+                  <div className="min-w-0">
+                    <p className="truncate text-base font-extrabold text-slate-900">{bio.name || "—"}</p>
+                    <p className="truncate text-xs font-semibold text-slate-500">{bio.role || "Business Development Manager"}{bio.hq ? ` · ${bio.hq} HQ` : ""}</p>
+                    <p className="truncate text-xs font-medium text-slate-400">{currentEmail || bio.email || "—"}</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => goTo("bio")} className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white py-2.5 text-xs font-extrabold text-slate-700 transition hover:bg-slate-50">
+                    <Pencil className="h-3.5 w-3.5" /> Edit profile
+                  </button>
+                  <button onClick={handleSignOut} className="flex items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 py-2.5 text-xs font-extrabold text-rose-600 transition hover:bg-rose-100">
+                    <LogOut className="h-3.5 w-3.5" /> Sign out
+                  </button>
+                </div>
+
+                {/* change password */}
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
+                  <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest text-slate-500"><Lock className="h-3.5 w-3.5" /> Change password</p>
+                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                      <input type={showNewPw ? "text" : "password"} value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="New password" autoComplete="new-password" className="w-full bg-transparent py-1 text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
+                      <button type="button" onClick={() => setShowNewPw(!showNewPw)} title={showNewPw ? "Hide password" : "Show password"} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-emerald-700">
+                        {showNewPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                    <input type={showNewPw ? "text" : "password"} value={newPw2} onChange={(e) => setNewPw2(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleChangePassword()} placeholder="Confirm new password" autoComplete="new-password" className={inputCls} />
+                  </div>
+                  {pwMsg && <p className={`mt-2 rounded-xl px-3 py-2 text-xs font-bold ring-1 ${pwMsg.ok ? "bg-emerald-50 text-emerald-800 ring-emerald-200" : "bg-rose-50 text-rose-700 ring-rose-200"}`}>{pwMsg.text}</p>}
+                  <button onClick={handleChangePassword} disabled={pwBusy} className="mt-3 rounded-xl bg-emerald-700 px-5 py-2.5 text-xs font-extrabold text-white transition hover:bg-emerald-800 disabled:opacity-60">
+                    {pwBusy ? "Updating…" : "Update password"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* ---------- Online store (locked connection) ---------- */}
+            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
+                <p className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-widest text-slate-600"><Cloud className="h-4 w-4 text-sky-600" /> Online store</p>
+                <span className={`rounded-full px-3 py-1 text-[11px] font-extrabold ${syncState === "error" ? "bg-rose-100 text-rose-700" : syncState === "loading" || syncBusy ? "bg-slate-100 text-slate-600" : "bg-emerald-100 text-emerald-800"}`}>
+                  {syncState === "error" ? "Problem" : syncState === "loading" || syncBusy ? "Syncing…" : "Connected"}
+                </span>
+              </div>
+              <div className="space-y-4 p-5 sm:p-6">
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="min-w-0 flex-1 text-xs font-semibold text-slate-500">
+                    {lastSync ? `Last synced at ${new Date(lastSync).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}` : "Not synced yet in this session"}
+                  </p>
+                  <button onClick={syncNow} disabled={syncBusy || syncState === "loading"} className="flex items-center gap-1.5 rounded-full bg-sky-600 px-4 py-2 text-xs font-extrabold text-white transition hover:bg-sky-700 disabled:opacity-60">
+                    <RefreshCcw className={`h-3.5 w-3.5 ${syncBusy ? "animate-spin" : ""}`} /> {syncBusy ? "Syncing…" : "Sync now"}
+                  </button>
+                </div>
+                {syncState === "error" && syncError && (
+                  <p className="rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{syncError}</p>
+                )}
+
+                {/* connection details — read-only, can't be edited */}
+                <div className="space-y-2.5 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+                  <div>
+                    <p className="mb-1 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Project URL</p>
+                    <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                      <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-slate-700">{cfg?.url || "—"}</span>
+                    </div>
+                  </div>
+                  <div>
+                    <p className="mb-1 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Publishable key</p>
+                    <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                      <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-slate-700">{cfg ? maskKey(cfg.key) : "—"}</span>
+                    </div>
+                  </div>
+                  <p className="flex items-start gap-1.5 text-[11px] font-semibold leading-relaxed text-slate-500">
+                    <Lock className="mt-0.5 h-3 w-3 shrink-0" /> Locked — built into the app. The URL and key always stay the same and can't be edited.
+                  </p>
+                </div>
+
+                {/* what's saved online */}
+                <div>
+                  <p className="mb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Saved in your account</p>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    {[
+                      { label: "Doctors", value: doctors.length },
+                      { label: "Reminders", value: reminders.length },
+                      { label: "Orders", value: payments.length },
+                      { label: "Areas", value: patches.length },
+                    ].map((s) => (
+                      <div key={s.label} className="rounded-xl bg-sky-50 px-3 py-2 text-center ring-1 ring-sky-100">
+                        <p className="text-lg font-extrabold text-sky-900">{s.value}</p>
+                        <p className="text-[10px] font-extrabold uppercase tracking-wider text-sky-700">{s.label}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* one-time database setup (read-only SQL to run in Supabase) */}
+                <details className="group rounded-2xl border border-slate-200 bg-white" open={/nutrova_store|SQL setup/i.test(syncError)}>
+                  <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-xs font-extrabold text-slate-700 [&::-webkit-details-marker]:hidden">
+                    <Database className="h-4 w-4 shrink-0 text-slate-400" />
+                    <span className="min-w-0 flex-1">Database setup (one time, in Supabase)</span>
+                    <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition group-open:rotate-180" />
+                  </summary>
+                  <div className="space-y-3 border-t border-slate-100 px-4 py-3">
+                    <p className="text-[11px] font-semibold leading-relaxed text-slate-500">
+                      Only needed once: Supabase → SQL Editor → paste and run. Also turn off “Confirm email” (Authentication → Providers → Email) so new accounts can sign in right away.
+                    </p>
+                    <button onClick={copySetupSql} className="flex items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-[11px] font-extrabold text-white hover:bg-slate-700">
+                      {sqlCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />} {sqlCopied ? "Copied" : "Copy SQL"}
+                    </button>
+                    <pre className="max-h-48 overflow-auto rounded-xl bg-slate-900 p-3 text-[10.5px] leading-relaxed text-emerald-200">{SETUP_SQL}</pre>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+            {/* ---------- App ---------- */}
+            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm lg:col-span-2">
+              <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
+                <Smartphone className="h-4 w-4 text-amber-600" />
+                <p className="text-xs font-extrabold uppercase tracking-widest text-slate-600">App</p>
+              </div>
+              <div className="grid grid-cols-1 gap-5 p-5 sm:p-6 md:grid-cols-3">
+                <div className="space-y-2">
+                  <p className="text-sm font-extrabold text-slate-900">Share with your team</p>
+                  <p className="text-xs font-medium leading-relaxed text-slate-500">Send the app link or QR code — teammates create their own account.</p>
+                  <button onClick={() => setShareOpen(true)} className="flex items-center gap-1.5 rounded-full bg-amber-400 px-4 py-2 text-xs font-extrabold text-amber-950 transition hover:bg-amber-300">
+                    <Share2 className="h-3.5 w-3.5" /> Share app
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-sm font-extrabold text-slate-900">Install on your phone</p>
+                  <p className="text-xs font-medium leading-relaxed text-slate-500">
+                    Android: open in Chrome → ⋮ menu → <span className="font-bold text-slate-700">Add to Home screen</span>.
+                    iPhone: Safari → Share → <span className="font-bold text-slate-700">Add to Home Screen</span>.
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-extrabold text-slate-900">About</p>
+                  <p className="text-xs font-medium text-slate-500">Nutrova Doctor Tracker</p>
+                  <p className="text-xs font-medium text-slate-500">App created by <span className="font-extrabold uppercase text-emerald-800">{APP_OWNER.name}</span></p>
+                  <p className="text-xs font-medium text-slate-500">{APP_OWNER.role} at {APP_OWNER.hq} HQ</p>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -2705,7 +3428,17 @@ export default function App() {
             <Field label="Visit frequency"><select value={doctorModal.draft.frequency} onChange={(e) => setDraft({ frequency: e.target.value })} className={inputCls}>{["Weekly", "Fortnightly", "Monthly", "Quarterly"].map((f) => <option key={f}>{f}</option>)}</select></Field>
             <Field label="Priority"><select value={doctorModal.draft.priority} onChange={(e) => setDraft({ priority: e.target.value as Doctor["priority"] })} className={inputCls}><option>High</option><option>Medium</option><option>Low</option></select></Field>
             <Field label="Last visit"><input type="date" value={doctorModal.draft.lastVisit} onChange={(e) => setDraft({ lastVisit: e.target.value })} className={inputCls} /></Field>
-            <Field label="Next visit"><input type="date" value={doctorModal.draft.nextVisit} onChange={(e) => setDraft({ nextVisit: e.target.value })} className={inputCls} /></Field>
+            <Field label="Next visit (optional)">
+              <div className="flex gap-2">
+                <input type="date" value={doctorModal.draft.nextVisit} onChange={(e) => setDraft({ nextVisit: e.target.value })} className={inputCls} />
+                {doctorModal.draft.nextVisit && (
+                  <button type="button" onClick={() => setDraft({ nextVisit: "" })} title="Clear — mark as not planned" className="flex h-[42px] w-[46px] shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-400 transition hover:border-rose-300 hover:text-rose-600">
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+              <p className="mt-1 text-[11px] font-medium text-slate-400">Leave empty if not planned yet — pick a date only when needed.</p>
+            </Field>
             <Field label="Notes" span><textarea value={doctorModal.draft.notes} onChange={(e) => setDraft({ notes: e.target.value })} placeholder="Preferences, timings, Rx behaviour…" rows={2} className={inputCls} /></Field>
           </div>
           <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
@@ -2730,23 +3463,15 @@ export default function App() {
           {/* create / edit form */}
           <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50/40 p-4">
             <p className="text-[11px] font-extrabold uppercase tracking-widest text-emerald-800">{patchDraft.id ? "Edit area patch" : "Create new area patch"}</p>
-            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="mt-3">
               <Field label="Area name *"><input value={patchDraft.name} onChange={(e) => setPatchDraft({ ...patchDraft, name: e.target.value })} placeholder="e.g. Koramangala" className={inputCls} /></Field>
-              <div>
-                <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Colour</span>
-                <div className="flex gap-2">
-                  {PATCH_COLORS.map((c) => (
-                    <button key={c} type="button" onClick={() => setPatchDraft({ ...patchDraft, color: c })} className={`h-9 w-9 rounded-full ${patchStyles(c).dot} transition ${patchDraft.color === c ? "ring-2 ring-slate-900 ring-offset-2" : "opacity-60 hover:opacity-100"}`} title={c} />
-                  ))}
-                </div>
-              </div>
             </div>
             <div className="mt-3 flex gap-2">
               <button onClick={savePatch} className="flex items-center gap-1.5 rounded-xl bg-emerald-700 px-5 py-2.5 text-sm font-extrabold text-white transition hover:bg-emerald-800">
                 {patchDraft.id ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />} {patchDraft.id ? "Update area" : "Create area"}
               </button>
               {patchDraft.id && (
-                <button onClick={() => setPatchDraft({ id: "", name: "", color: "emerald" })} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-slate-500 hover:bg-slate-50">Cancel edit</button>
+                <button onClick={() => setPatchDraft({ id: "", name: "" })} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-slate-500 hover:bg-slate-50">Cancel edit</button>
               )}
             </div>
           </div>
@@ -2799,7 +3524,7 @@ export default function App() {
 
       {/* ------------------------------ reminder modal ----------------------------- */}
       {reminderModal.open && (
-        <Modal title={reminderModal.editing ? "Edit Reminder" : "Add Reminder"} onClose={() => setReminderModal({ open: false, draft: emptyReminder(), editing: false })}>
+        <Modal title={reminderModal.editing ? "Edit / Postpone Reminder" : "Add Reminder"} onClose={() => setReminderModal({ open: false, draft: emptyReminder(), editing: false })}>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Title *" span><input value={reminderModal.draft.title} onChange={(e) => setReminderModal({ ...reminderModal, draft: { ...reminderModal.draft, title: e.target.value } })} placeholder="e.g. Morning visit with samples" className={inputCls} /></Field>
             <Field label="Doctor — search by name or area" span>
@@ -2833,6 +3558,22 @@ export default function App() {
             </Field>
             <Field label="Date"><input type="date" value={reminderModal.draft.date} onChange={(e) => setReminderModal({ ...reminderModal, draft: { ...reminderModal.draft, date: e.target.value } })} className={inputCls} /></Field>
             <Field label="Time"><input type="time" value={reminderModal.draft.time} onChange={(e) => setReminderModal({ ...reminderModal, draft: { ...reminderModal.draft, time: e.target.value } })} className={inputCls} /></Field>
+            <Field label="Alarm with sound" span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setReminderModal({ ...reminderModal, draft: { ...reminderModal.draft, alarm: reminderModal.draft.alarm === false } })}
+                  className={`flex items-center gap-2 rounded-full px-4 py-2 text-xs font-extrabold transition ${reminderModal.draft.alarm === false ? "bg-slate-100 text-slate-500 hover:bg-slate-200" : "bg-amber-400 text-amber-950 shadow hover:bg-amber-300"}`}
+                >
+                  <AlarmClock className="h-4 w-4" />
+                  {reminderModal.draft.alarm === false ? "Alarm off" : "Alarm on — rings with sound"}
+                </button>
+                <button type="button" onClick={testAlarmSound} title="Play test sound" className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2 text-xs font-extrabold text-slate-500 transition hover:border-emerald-300 hover:text-emerald-700">
+                  <Volume2 className="h-4 w-4" /> Test sound
+                </button>
+              </div>
+              <p className="mt-1.5 text-[11px] font-medium text-slate-400">When the date & time arrive, this reminder rings in the app with sound + a phone notification.</p>
+            </Field>
             <Field label="Type" span>
               <div className="flex flex-wrap gap-2">
                 {(["Visit", "Call", "Follow-up", "Payment", "Sample Drop"] as ReminderKind[]).map((k) => (
@@ -2850,7 +3591,7 @@ export default function App() {
             )}
             <div className="flex flex-1 flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button onClick={() => setReminderModal({ open: false, draft: emptyReminder(), editing: false })} className="rounded-xl border border-slate-200 px-5 py-2.5 text-sm font-bold text-slate-600 transition hover:bg-slate-50">Cancel</button>
-              <button onClick={saveReminder} className="rounded-xl bg-emerald-700 px-6 py-2.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800">{reminderModal.editing ? "Update Reminder" : "Add Reminder"}</button>
+              <button onClick={saveReminder} className="rounded-xl bg-emerald-700 px-6 py-2.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800">{reminderModal.editing ? "Save new date" : "Add Reminder"}</button>
             </div>
           </div>
         </Modal>
@@ -2868,6 +3609,7 @@ export default function App() {
                 placeholder="Type doctor name or area"
               />
             </Field>
+            <Field label="Billing name *"><input value={paymentModal.draft.billingName} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, billingName: e.target.value } })} placeholder="e.g. DermaCare Clinic" className={inputCls} /></Field>
             <Field label="Invoice no *">
               <div className="flex gap-2">
                 <input value={paymentModal.draft.invoiceNo} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, invoiceNo: e.target.value } })} placeholder="INV-2026-1001" className={`${inputCls} font-mono`} />
@@ -2910,7 +3652,7 @@ export default function App() {
             </div>
 
             <Field label="Order total (₹) *"><input type="number" min={0} value={paymentModal.draft.amount || ""} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, amount: Number(e.target.value) } })} placeholder="10000" className={inputCls} /></Field>
-            <Field label="Mode"><select value={paymentModal.draft.mode} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, mode: e.target.value } })} className={inputCls}>{["UPI", "Bank Transfer", "Cheque", "Cash"].map((m) => <option key={m}>{m}</option>)}</select></Field>
+            <Field label="Mode (optional)"><select value={paymentModal.draft.mode} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, mode: e.target.value } })} className={inputCls}><option value="">— Select —</option>{["UPI", "Bank Transfer", "Cheque", "Cash"].map((m) => <option key={m}>{m}</option>)}</select></Field>
             <Field label="Due date"><input type="date" value={paymentModal.draft.dueDate} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, dueDate: e.target.value } })} className={inputCls} /></Field>
             <Field label="Status"><select value={paymentModal.draft.status} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, status: e.target.value as PaymentStatus } })} className={inputCls}><option value="pending">Pending</option><option value="paid">Paid</option></select></Field>
           </div>
@@ -2947,6 +3689,62 @@ export default function App() {
         </Modal>
       )}
 
+      {/* ---------- Reminder alarm: ringing overlay ---------- */}
+      {ringing.length > 0 && (
+        <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/60 p-4 backdrop-blur-sm sm:items-center">
+          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+            <div className="bg-gradient-to-r from-amber-400 to-orange-400 px-6 py-5 text-amber-950">
+              <div className="flex items-center gap-3">
+                <div className="anim-ring flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/90 shadow">
+                  <BellRing className="h-6 w-6 text-amber-600" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-lg font-extrabold leading-tight">Reminder alarm!</p>
+                  <p className="text-xs font-bold opacity-80">{ringing.length} task{ringing.length > 1 ? "s" : ""} due now</p>
+                </div>
+                <button onClick={() => playAlarmSound(2)} title="Replay sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/90 text-amber-700 shadow transition hover:bg-white">
+                  <Volume2 className="h-5 w-5" />
+                </button>
+                <button onClick={() => setRinging([])} title="Skip alarm" aria-label="Skip alarm" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+            <div className="max-h-[50vh] space-y-3 overflow-y-auto p-5">
+              {ringing.map((r) => (
+                <div key={r.id} className="rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`rounded-full border px-2.5 py-0.5 text-[11px] font-extrabold ${KIND_COLORS[r.kind]}`}>{r.kind}</span>
+                    <span className="flex items-center gap-1 text-[11px] font-extrabold text-slate-500"><Clock className="h-3 w-3" />{fmtDate(r.date)} · {r.time}</span>
+                  </div>
+                  <p className="mt-1.5 text-[15px] font-extrabold text-slate-900">{r.title}</p>
+                  <p className="mt-0.5 flex items-center gap-1 text-[13px] font-semibold text-slate-500">
+                    <User className="h-3.5 w-3.5" /> {r.doctorName || "General"}{r.doctorArea ? ` · ${r.doctorArea}` : ""}
+                  </p>
+                  {r.notes && <p className="mt-1 text-[13px] font-medium text-slate-500">{r.notes}</p>}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button onClick={() => completeRinging(r)} className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-emerald-700 px-3 py-2 text-xs font-extrabold text-white transition hover:bg-emerald-800">
+                      <Check className="h-3.5 w-3.5" /> Done
+                    </button>
+                    <button onClick={() => snoozeReminder(r.id, 10)} className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-extrabold text-slate-600 transition hover:bg-slate-50">
+                      <Clock className="h-3.5 w-3.5" /> Snooze 10m
+                    </button>
+                    <button onClick={() => dismissRinging(r.id)} className="rounded-xl px-3 py-2 text-xs font-bold text-slate-400 underline-offset-2 hover:text-slate-600 hover:underline">
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="border-t border-slate-100 p-4">
+              <button onClick={() => { setRinging([]); goTo("reminders"); }} className="w-full rounded-xl bg-slate-900 py-2.5 text-sm font-extrabold text-white transition hover:bg-slate-700">
+                Open Reminders
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {confirmDelete.open && (
         <ConfirmDialog
           title={confirmDelete.title || "Please confirm"}
@@ -2967,14 +3765,6 @@ export default function App() {
           onClose={() => setShareOpen(false)}
           onNative={handleNativeShare}
           onCopy={handleCopyLink}
-        />
-      )}
-      {setupOpen && (
-        <SetupDialog
-          cfg={cfg}
-          onClose={() => setSetupOpen(false)}
-          onSave={(c) => { saveConfig(c); setCfg(c); setSession(null); setSetupOpen(false); showToast("Online store connected"); }}
-          onDisconnect={() => { clearConfig(); setCfg(null); setSession(null); setRemote(null); setSetupOpen(false); showToast("Disconnected — using this phone only", "info"); }}
         />
       )}
 
@@ -3178,78 +3968,6 @@ function Modal({ title, children, onClose, wide }: { title: string; children: Re
   );
 }
 
-/* Online store setup — owner pastes the Supabase project URL + anon key once */
-function SetupDialog({ cfg, onSave, onDisconnect, onClose }: {
-  cfg: BackendConfig | null; onSave: (c: BackendConfig) => void; onDisconnect: () => void; onClose: () => void;
-}) {
-  const [url, setUrl] = useState(cfg?.url || "");
-  const [key, setKey] = useState(cfg?.key || "");
-  const [err, setErr] = useState("");
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
-  const copySql = async () => {
-    try { await navigator.clipboard.writeText(SETUP_SQL); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* ignore */ }
-  };
-  const save = () => {
-    const u = url.trim().replace(/\/+$/, "");
-    const k = key.trim();
-    if (!/^https:\/\/.+\..+/.test(u)) return setErr("Project URL must start with https:// (e.g. https://abcd1234.supabase.co)");
-    if (k.length < 20) return setErr("Paste the full anon / public key");
-    onSave({ url: u, key: k });
-  };
-  return (
-    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={onClose}>
-      <div className="anim-pop max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-white shadow-2xl sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between gap-3 bg-emerald-950 px-6 py-5 text-white">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20"><Cloud className="h-5 w-5 text-emerald-300" /></div>
-            <div>
-              <p className="text-base font-extrabold leading-tight">Online store setup</p>
-              <p className="text-xs text-emerald-200/70">Backend + frontend · accounts & data in the cloud</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-full bg-white/10 hover:bg-white/20"><X className="h-4 w-4" /></button>
-        </div>
-        <div className="space-y-4 p-6">
-          <p className="rounded-xl bg-emerald-50 px-4 py-3 text-xs font-semibold leading-relaxed text-emerald-900 ring-1 ring-emerald-100">
-            Passwords are stored (hashed) on the server and every account's doctors, reminders and purchase orders are saved online — sign in on any phone and the same data appears. Free Supabase plan is enough.
-          </p>
-          <ol className="space-y-2 text-xs font-semibold leading-relaxed text-slate-600">
-            <li><span className="font-extrabold text-slate-900">1.</span> Create a free project at <span className="font-extrabold">supabase.com</span></li>
-            <li><span className="font-extrabold text-slate-900">2.</span> Authentication → Providers → Email → turn <span className="font-extrabold">“Confirm email” OFF</span> (so new accounts sign in instantly)</li>
-            <li className="flex flex-wrap items-center gap-2">
-              <span><span className="font-extrabold text-slate-900">3.</span> SQL Editor → paste & run:</span>
-              <button onClick={copySql} className="flex items-center gap-1 rounded-full bg-slate-900 px-3 py-1 text-[11px] font-extrabold text-white hover:bg-slate-700">
-                {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />} {copied ? "Copied" : "Copy SQL"}
-              </button>
-            </li>
-          </ol>
-          <pre className="max-h-40 overflow-auto rounded-xl bg-slate-900 p-3 text-[10.5px] leading-relaxed text-emerald-200">{SETUP_SQL}</pre>
-          <p className="text-xs font-semibold text-slate-600"><span className="font-extrabold text-slate-900">4.</span> Project Settings → API → copy <span className="font-extrabold">Project URL</span> and <span className="font-extrabold">anon public key</span>:</p>
-          <div>
-            <label className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Project URL</label>
-            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://xxxxxxxx.supabase.co" className={inputCls} />
-          </div>
-          <div>
-            <label className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Anon public key</label>
-            <textarea value={key} onChange={(e) => setKey(e.target.value)} rows={3} placeholder="eyJhbGciOi…" className={`${inputCls} font-mono text-xs`} />
-          </div>
-          {err && <p className="rounded-xl bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{err}</p>}
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            {cfg && <button onClick={onDisconnect} className="rounded-xl border border-rose-200 bg-rose-50 px-5 py-2.5 text-sm font-extrabold text-rose-600 hover:bg-rose-100">Disconnect</button>}
-            <button onClick={save} className="rounded-xl bg-emerald-700 px-6 py-2.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 hover:bg-emerald-800">{cfg ? "Update connection" : "Save & connect"}</button>
-          </div>
-          <p className="text-[11px] font-medium leading-relaxed text-slate-400">The anon key is public by design — your data stays private because every row is locked to its owner (Row Level Security). The share link includes this connection so teammates connect automatically.</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* Share app — link + QR + install steps */
 function ShareAppDialog({ url, text, copied, online, onClose, onNative, onCopy }: {
   url: string; text: string; copied: boolean; online: boolean; onClose: () => void; onNative: () => void; onCopy: () => void;
@@ -3272,7 +3990,7 @@ function ShareAppDialog({ url, text, copied, online, onClose, onNative, onCopy }
               </div>
               <div>
                 <p className="text-base font-extrabold leading-tight">Share this app</p>
-                <p className="text-xs text-emerald-200/70">{online ? "Link includes the online store — teammates just create an account" : "Send to other Business Development Managers like an APK"}</p>
+                <p className="text-xs text-emerald-200/70">{online ? "Online store is built in — teammates just create an account" : "Send to other Business Development Managers like an APK"}</p>
               </div>
             </div>
             <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"><X className="h-4 w-4" /></button>
