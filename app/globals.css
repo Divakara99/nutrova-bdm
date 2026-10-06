@@ -90,3 +90,110 @@ body {
 .anim-pulse-soft {
   animation: pulseSoft 2s ease-in-out infinite;
 }
+
+@keyframes ringShake {
+  0%, 100% { transform: rotate(0); }
+  20% { transform: rotate(14deg); }
+  40% { transform: rotate(-12deg); }
+  60% { transform: rotate(8deg); }
+  80% { transform: rotate(-6deg); }
+}
+.anim-ring {
+  animation: ringShake 0.9s ease-in-out infinite;
+  transform-origin: top center;
+}
+
+/* ============ Android PHONES only (not tablets, not web) ============
+   The `android-phone` class is added to <html> only when the device is an
+   Android phone (Android + Mobile UA + narrow screen). Everything below is
+   scoped under it, so tablets and desktop render exactly as before. */
+
+/* Scale down all rem-based Tailwind text (16px -> 14px base) */
+html.android-phone {
+  font-size: 14px;
+}
+
+.android-phone body {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  line-height: 1.45;
+}
+
+/* Page titles (Dashboard / Doctors / Reminders / Payments / Bio / Settings) */
+.android-phone main h2 {
+  font-size: 1.4rem !important;
+  line-height: 1.8rem !important;
+  letter-spacing: -0.015em !important;
+}
+
+/* Frozen header title + tagline use px sizes, so override explicitly */
+.android-phone header h1 {
+  font-size: 1rem !important;
+  line-height: 1.3rem !important;
+}
+.android-phone header p {
+  font-size: 0.72rem !important;
+  line-height: 1.05rem !important;
+}
+
+/* Big numbers on summary cards */
+.android-phone .text-3xl {
+  font-size: 1.5rem !important;
+  line-height: 1.9rem !important;
+}
+
+/* Section subtitles / helper sentences — slightly smaller, roomier lines */
+.android-phone main section > p,
+.android-phone main section > div > p {
+  font-size: 0.8rem !important;
+  line-height: 1.3rem !important;
+}
+
+/* Sentences must wrap and never push the layout sideways */
+.android-phone p,
+.android-phone li,
+.android-phone td,
+.android-phone th,
+.android-phone label,
+.android-phone input,
+.android-phone textarea,
+.android-phone select {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Tighten spacing so more fits on a phone screen */
+.android-phone main {
+  padding-left: 1rem !important;
+  padding-right: 1rem !important;
+  padding-top: 1.25rem !important;
+  padding-bottom: 1.25rem !important;
+}
+.android-phone main .rounded-3xl {
+  border-radius: 1.1rem !important;
+}
+.android-phone article {
+  padding: 1rem !important;
+}
+
+/* Tables + table-like rows: smaller, comfortable to read */
+.android-phone table {
+  font-size: 0.78rem !important;
+}
+.android-phone th {
+  font-size: 0.62rem !important;
+  letter-spacing: 0.04em !important;
+}
+
+/* Inputs: 16px stops iOS-style auto-zoom and keeps Android text crisp */
+.android-phone input,
+.android-phone textarea,
+.android-phone select {
+  font-size: 16px !important;
+}
+
+/* Pills / chips / buttons: compact but tappable */
+.android-phone nav button,
+.android-phone button.rounded-full {
+  font-size: 0.78rem !important;
+}

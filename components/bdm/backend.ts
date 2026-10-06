@@ -129,41 +129,39 @@ function toSession(
 }
 
 /* ------------------------------- config ------------------------------- */
-export function readConfig(): BackendConfig | null {
-  /* a shared link can carry the connection: #cfg=<base64 json> */
+/* The connection is LOCKED to the Nutrova project above. It can't be edited in the app,
+   saved over on the phone, or overridden by a link, so the URL and key always stay the same. */
+const LOCKED_CONFIG: BackendConfig = { url: clean(DEFAULT_URL), key: DEFAULT_KEY };
+
+export function readConfig(): BackendConfig {
   try {
-    const m = window.location.hash.match(/cfg=([^&]+)/);
-    if (m) {
-      const json = JSON.parse(atob(decodeURIComponent(m[1])));
-      if (json?.url && json?.key) {
-        localStorage.setItem(CFG_KEY, JSON.stringify({ url: clean(json.url), key: String(json.key).trim() }));
-        window.history.replaceState(null, "", window.location.pathname + window.location.search);
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  try {
+    /* older versions could save a different connection on the phone — drop it */
     const raw = localStorage.getItem(CFG_KEY);
     if (raw) {
-      const c = JSON.parse(raw);
-      if (c?.url && c?.key) return { url: clean(c.url), key: String(c.key).trim() };
+      localStorage.removeItem(CFG_KEY);
+      const old = JSON.parse(raw);
+      if (old?.url && clean(String(old.url)) !== LOCKED_CONFIG.url) clearSession();
     }
   } catch {
     /* ignore */
   }
-  if (DEFAULT_URL && DEFAULT_KEY) return { url: clean(DEFAULT_URL), key: DEFAULT_KEY };
-  return null;
+  try {
+    /* older share links carried a connection in the address (#cfg=…) — ignore it and tidy the address */
+    if (/cfg=/.test(window.location.hash)) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  } catch {
+    /* ignore */
+  }
+  return { ...LOCKED_CONFIG };
 }
-export function saveConfig(c: BackendConfig) {
-  localStorage.setItem(CFG_KEY, JSON.stringify({ url: clean(c.url), key: c.key.trim() }));
-}
-export function clearConfig() {
-  localStorage.removeItem(CFG_KEY);
-  clearSession();
-}
-export function shareHash(c: BackendConfig): string {
-  return "#cfg=" + encodeURIComponent(btoa(JSON.stringify({ url: clean(c.url), key: c.key.trim() })));
+
+/* For display only, e.g. "sb_publishable_••••••••wQLP" */
+export function maskKey(key: string): string {
+  const k = (key || "").trim();
+  if (k.length <= 12) return "••••••••";
+  const head = k.match(/^sb_(publishable|secret)_/i)?.[0] || k.slice(0, 6);
+  return `${head}••••••••${k.slice(-4)}`;
 }
 
 /* ------------------------------- session ------------------------------- */
@@ -229,6 +227,199 @@ export async function signInRemote(cfg: BackendConfig, email: string, password: 
       last = e instanceof Error ? e.message : "Sign in failed";
       if (!isKeyError(last)) break;
     }
+  }
+  throw new Error(finalError(last));
+}
+
+/* Forgot password: Supabase emails the user a reset link.
+   The link opens this app again (redirectTo), carrying a recovery session in the URL hash. */
+export async function requestPasswordReset(cfg: BackendConfig, email: string): Promise<void> {
+  let redirectTo: string | undefined;
+  try {
+    redirectTo = window.location.origin + window.location.pathname;
+  } catch {
+    redirectTo = undefined;
+  }
+  let last = "";
+  for (const key of keyCandidates(cfg.key)) {
+    const c = clientFor(cfg.url, key);
+    try {
+      const { error } = await c.auth.resetPasswordForEmail(email, redirectTo ? { redirectTo } : undefined);
+      if (!error) return;
+      last = error.message;
+      if (!isKeyError(last)) break;
+    } catch (e) {
+      last = e instanceof Error ? e.message : "Could not send reset link";
+      if (!isKeyError(last)) break;
+    }
+  }
+  if (/redirect|url/i.test(last)) throw new Error("Reset email blocked — add this app's address in Supabase Authentication → URL Configuration");
+  throw new Error(finalError(last));
+}
+
+/* When the user opens the reset link, the URL hash holds a recovery session.
+   Pick it up once (without signing in yet) so the app can show a "set new password" screen. */
+export function pendingRecoveryTokens(): { access_token: string; refresh_token: string } | null {
+  try {
+    const h = window.location.hash || "";
+    if (!/type=recovery/.test(h)) return null;
+    const params = new URLSearchParams(h.replace(/^#/, ""));
+    const at = params.get("access_token") || "";
+    const rt = params.get("refresh_token") || "";
+    if (at && rt) return { access_token: at, refresh_token: rt };
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+export function clearUrlHash() {
+  try {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  } catch {
+    /* ignore */
+  }
+}
+
+/* Adopt the recovery session, then the new password can be set via updatePasswordRemote */
+export async function adoptRecoverySession(
+  cfg: BackendConfig,
+  tokens: { access_token: string; refresh_token: string }
+): Promise<BackendSession> {
+  let last = "";
+  for (const key of keyCandidates(cfg.key)) {
+    const c = clientFor(cfg.url, key);
+    try {
+      const { data, error } = await c.auth.setSession(tokens);
+      if (!error && data.session) {
+        clearUrlAuthParams();
+        return toSession(data.session, data.session.user ?? undefined);
+      }
+      last = error?.message || "Reset link expired";
+      if (!isKeyError(last)) break;
+    } catch (e) {
+      last = e instanceof Error ? e.message : "Reset link expired";
+      if (!isKeyError(last)) break;
+    }
+  }
+  if (/expired|invalid/i.test(last)) throw new Error("Reset link expired — please request a new one");
+  throw new Error(finalError(last));
+}
+
+/* Which password-recovery link (if any) did this page load with?
+   Supabase sends different shapes depending on project/client flow:
+   - #access_token=…&refresh_token=…&type=recovery (older implicit flow)
+   - ?code=… (current PKCE flow)
+   - ?token_hash=…&type=recovery (some email templates)
+   - #error=… or ?error=… (expired / already-used link) */
+export type UrlRecoverySignal =
+  | { kind: "hash-tokens"; access_token: string; refresh_token: string }
+  | { kind: "code"; code: string }
+  | { kind: "token-hash"; token_hash: string }
+  | { kind: "error"; message: string };
+
+export function getUrlRecoverySignal(): UrlRecoverySignal | null {
+  try {
+    const h = window.location.hash || "";
+    if (h) {
+      const hp = new URLSearchParams(h.replace(/^#/, ""));
+      const herr = hp.get("error_description") || hp.get("error") || "";
+      if (herr) return { kind: "error", message: herr };
+      const at = hp.get("access_token") || "";
+      const rt = hp.get("refresh_token") || "";
+      if (at && rt) return { kind: "hash-tokens", access_token: at, refresh_token: rt };
+      const hc = hp.get("code") || "";
+      if (hc) return { kind: "code", code: hc };
+    }
+    const q = window.location.search || "";
+    if (q) {
+      const qp = new URLSearchParams(q);
+      const qerr = qp.get("error_description") || qp.get("error") || "";
+      if (qerr) return { kind: "error", message: qerr };
+      const code = qp.get("code") || "";
+      if (code) return { kind: "code", code };
+      const th = qp.get("token_hash") || "";
+      if (th) return { kind: "token-hash", token_hash: th };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/* Wipe single-use auth leftovers (codes, tokens, errors) from the address bar */
+export function clearUrlAuthParams() {
+  try {
+    window.history.replaceState(null, "", window.location.pathname);
+  } catch {
+    /* ignore */
+  }
+}
+
+/* Exchange a ?code= recovery link for a session (must open on the same phone/browser that requested it) */
+export async function exchangeRecoveryCode(cfg: BackendConfig, code: string): Promise<BackendSession> {
+  let last = "";
+  for (const key of keyCandidates(cfg.key)) {
+    const c = clientFor(cfg.url, key);
+    try {
+      const { data, error } = await c.auth.exchangeCodeForSession(code);
+      if (!error && data.session) {
+        clearUrlAuthParams();
+        return toSession(data.session, data.session.user ?? undefined);
+      }
+      last = error?.message || "Reset link expired";
+      if (!isKeyError(last)) break;
+    } catch (e) {
+      last = e instanceof Error ? e.message : "Reset link expired";
+      if (!isKeyError(last)) break;
+    }
+  }
+  if (/expired|invalid|used|verifier|non-empty|not found/i.test(last))
+    throw new Error("Reset link expired or was opened on a different phone — please request a new link");
+  throw new Error(finalError(last));
+}
+
+/* Verify a ?token_hash= recovery link */
+export async function verifyRecoveryTokenHash(cfg: BackendConfig, token_hash: string): Promise<BackendSession> {
+  let last = "";
+  for (const key of keyCandidates(cfg.key)) {
+    const c = clientFor(cfg.url, key);
+    try {
+      const { data, error } = await c.auth.verifyOtp({ type: "recovery", token_hash });
+      if (!error && data.session) {
+        clearUrlAuthParams();
+        return toSession(data.session, data.session.user ?? undefined);
+      }
+      last = error?.message || "Reset link expired";
+      if (!isKeyError(last)) break;
+    } catch (e) {
+      last = e instanceof Error ? e.message : "Reset link expired";
+      if (!isKeyError(last)) break;
+    }
+  }
+  if (/expired|invalid|used/i.test(last)) throw new Error("Reset link expired — please request a new one");
+  throw new Error(finalError(last));
+}
+
+/* Change the signed-in user's password on the server */
+export async function updatePasswordRemote(cfg: BackendConfig, password: string): Promise<void> {
+  let last = "";
+  for (const key of keyCandidates(cfg.key)) {
+    const r = await ready(clientFor(cfg.url, key));
+    if (!r.ok) {
+      last = r.error;
+      if (isKeyError(last)) continue;
+      throw new Error(friendly(last));
+    }
+    const { error } = await r.client.auth.updateUser({ password }).catch((e: unknown) => ({
+      error: { message: e instanceof Error ? e.message : "Could not update password" },
+    }));
+    if (!error) return;
+    last = error.message || "Could not update password";
+    if (isKeyError(last)) continue;
+    if (/different from the old|same.?password/i.test(last)) throw new Error("New password must be different from your current password");
+    if (/reauthenticat/i.test(last)) throw new Error("For security, sign out and sign in again, then change your password");
+    throw new Error(friendly(last));
   }
   throw new Error(finalError(last));
 }
