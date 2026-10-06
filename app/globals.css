@@ -15,7 +15,13 @@
 }
 
 html {
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
+}
+
+/* Speed: skip offscreen rendering for long lists */
+article, .doc-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
 }
 
 body {
