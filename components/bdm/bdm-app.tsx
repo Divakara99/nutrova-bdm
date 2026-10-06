@@ -27,6 +27,8 @@ import {
   User,
   Wallet,
   X,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 
 /* ---------------------------------- types ---------------------------------- */
@@ -633,6 +635,11 @@ const emptyPayment = (): Payment => ({ id: uid(), invoiceNo: genInvoiceNo(), doc
 export default function App() {
   const [signedIn, setSignedIn] = useState(false);
   const [loginEmail, setLoginEmail] = useState("divakar.reddy@nutrova.com");
+  const [loginPassword, setLoginPassword] = useState("nutrova123");
+  const [showPassword, setShowPassword] = useState(false);
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [signupName, setSignupName] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [bio, setBio] = useLocal<Bio>("nutrova-bio-v1", seedBio);
   const [doctors, setDoctors] = useLocal<Doctor[]>("nutrova-doctors-v3", seedDoctors);
   const [patches, setPatches] = useLocal<Patch[]>("nutrova-patches-v2", seedPatches);
@@ -1088,30 +1095,101 @@ export default function App() {
               </div>
             </div>
           </div>
-          <div className="space-y-4 px-8 py-7">
+          <form
+            className="space-y-4 px-8 py-7"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const email = loginEmail.trim();
+              if (!email || !email.includes("@")) return showToast("Enter a valid email", "info");
+              if (loginPassword.length < 6) return showToast("Password must be at least 6 characters", "info");
+              if (authMode === "signup") {
+                if (!signupName.trim()) return showToast("Enter your full name", "info");
+                if (loginPassword !== confirmPassword) return showToast("Passwords do not match", "info");
+                setBio((b) => ({ ...b, name: signupName.trim(), email }));
+                setSignedIn(true);
+                showToast(`Account created. Welcome, ${signupName.trim().split(" ")[0]}`);
+                return;
+              }
+              setBio((b) => ({ ...b, email }));
+              setSignedIn(true);
+              showToast(`Welcome back, ${bio.name.split(" ")[0] || "Rep"}`);
+            }}
+          >
             <div>
-              <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Work email</label>
+              <h2 className="text-xl font-extrabold text-slate-900">{authMode === "signin" ? "Sign in" : "Create account"}</h2>
+              <p className="mt-1 text-sm text-slate-500">{authMode === "signin" ? "Access your doctor tracker workspace." : "Set up your field rep workspace."}</p>
+            </div>
+            {authMode === "signup" && (
+              <div>
+                <label htmlFor="signup-name" className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Full name</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <User className="h-4 w-4 shrink-0 text-emerald-600" />
+                  <input id="signup-name" value={signupName} onChange={(e) => setSignupName(e.target.value)} autoComplete="name" className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="Your full name" />
+                </div>
+              </div>
+            )}
+            <div>
+              <label htmlFor="login-email" className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Work email</label>
               <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
                 <Mail className="h-4 w-4 shrink-0 text-emerald-600" />
-                <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" />
+                <input id="login-email" type="email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} autoComplete="email" className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" />
               </div>
             </div>
             <div>
-              <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Password</label>
-              <input type="password" defaultValue="nutrova123" className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" placeholder="••••••••" />
+              <label htmlFor="login-password" className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Password</label>
+              <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white py-1.5 pl-4 pr-1.5 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                <input
+                  id="login-password"
+                  type={showPassword ? "text" : "password"}
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  autoComplete={authMode === "signin" ? "current-password" : "new-password"}
+                  className="w-full bg-transparent py-1.5 text-sm font-medium text-slate-800 outline-none"
+                  placeholder="••••••••"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-emerald-50 hover:text-emerald-700"
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </div>
+            {authMode === "signup" && (
+              <div>
+                <label htmlFor="confirm-password" className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Confirm password</label>
+                <input
+                  id="confirm-password"
+                  type={showPassword ? "text" : "password"}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  autoComplete="new-password"
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                  placeholder="••••••••"
+                />
+              </div>
+            )}
             <button
-              onClick={() => {
-                if (loginEmail.trim()) setBio((b) => ({ ...b, email: loginEmail.trim() }));
-                setSignedIn(true);
-                showToast(`Welcome back, ${bio.name.split(" ")[0] || "Rep"}`);
-              }}
+              type="submit"
               className="w-full rounded-2xl bg-emerald-700 py-3.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99]"
             >
-              Sign in to Tracker
+              {authMode === "signin" ? "Sign in to Tracker" : "Create account"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode((m) => (m === "signin" ? "signup" : "signin"));
+                setConfirmPassword("");
+              }}
+              className="w-full rounded-2xl border border-emerald-200 py-3 text-sm font-bold text-emerald-800 transition hover:bg-emerald-50"
+            >
+              {authMode === "signin" ? "Create new account" : "Already have an account? Sign in"}
             </button>
             <p className="text-center text-xs text-slate-400">Secure workspace for Nutrova field team · Bangalore HQ</p>
-          </div>
+          </form>
         </div>
       </div>
     );
