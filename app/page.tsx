@@ -1,5 +1,5 @@
-import { TrackerApp } from '@/components/tracker/tracker-app'
+import { BdmAppLoader } from "@/components/bdm/bdm-app-loader";
 
 export default function Page() {
-  return <TrackerApp />
+  return <BdmAppLoader />;
 }
