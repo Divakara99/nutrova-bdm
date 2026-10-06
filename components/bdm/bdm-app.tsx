@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Bell,
   Building2,
@@ -8,7 +8,12 @@ import {
   CalendarDays,
   Check,
   Clock,
+  Cloud,
+  CloudOff,
+  Copy,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   IndianRupee,
   Layers,
@@ -26,11 +31,26 @@ import {
   Target,
   Trash2,
   User,
+  UserPlus,
   Wallet,
   X,
-  Eye,
-  EyeOff,
 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
+import {
+  SETUP_SQL,
+  clearConfig,
+  clearSession,
+  fetchAll,
+  loadSession,
+  readConfig,
+  saveConfig,
+  saveKey,
+  shareHash,
+  signInRemote,
+  signUpRemote,
+  type BackendConfig,
+  type BackendSession,
+} from "./backend";
 
 /* ---------------------------------- types ---------------------------------- */
 
@@ -85,9 +105,18 @@ interface Reminder {
   done: boolean;
 }
 
+/* A purchase order line — Nutrova product ordered by the doctor */
+interface OrderItem {
+  product: string;
+  qty: number;
+  rate: number;
+}
+
 interface Payment {
   id: string;
   invoiceNo: string;
+  orderDate: string;
+  items: OrderItem[];
   doctorName: string;
   doctorArea: string;
   purpose: string;
@@ -106,7 +135,33 @@ interface Bio {
   hq: string;
   phone: string;
   email: string;
+  rev?: number;
 }
+
+/* ------------------ Option B auth (login stays until signout) ----------------- */
+interface AppUser {
+  name: string;
+  email: string;
+  pass: string;
+  createdAt: string;
+}
+const AUTH_USERS_KEY = "nutrova-optionB-users-v1";
+const AUTH_SESSION_KEY = "nutrova-optionB-session-v1";
+const loadUsers = (): AppUser[] => {
+  try {
+    const raw = localStorage.getItem(AUTH_USERS_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr;
+    }
+  } catch { /* ignore */ }
+  return [];
+};
+const loadSessionEmail = (): string => {
+  try {
+    return localStorage.getItem(AUTH_SESSION_KEY) || "";
+  } catch { return ""; }
+};
 
 /* ------------------------------ schedule consts ----------------------------- */
 
@@ -210,6 +265,47 @@ const PRODUCT_CATS = ["Collagen Range", "Hair Health", "Skin Brightening & Acne"
 
 /* short label for chips (drops "Nutrova " prefix, keeps full flavour info) */
 const shortProduct = (n: string) => n.replace(/^Nutrova\s+/, "");
+
+/* Starting rates (₹) from nutrova.com listings — editable on every order line. 0 = enter your own rate */
+const DEFAULT_RATES: Record<string, number> = {
+  "Nutrova Collagen+Antioxidants (Cranberry Flavour)": 2575,
+  "Nutrova Collagen+Antioxidants (Watermelon Flavour - Zero Sugar)": 2575,
+  "Nutrova Poultry Collagen Peptides": 3120,
+  "Nutrova Marine Collagen Peptides": 2140,
+  "Nutrova Kerastrength": 1070,
+  "Nutrova Fish Oil 84": 1600,
+  "Nutrova Complete Omega 3": 1070,
+  "Nutrova Whey Protein Isolate - Unflavoured": 1800,
+  "Nutrova Whey Protein Isolate - Dark Chocolate Flavour": 1800,
+  "Nutrova Whey Protein Isolate - Vanilla Flavour": 1800,
+  "Nutrova Whey Protein Isolate - Mango Flavour": 1800,
+  "Nutrova Whey Protein Isolate - Strawberry Flavour": 1800,
+  "Nutrova Pea Protein - Unflavoured": 850,
+  "Nutrova Vegan Protein - Mango Flavour": 2230,
+  "Nutrova Magnesium+D3": 760,
+  "Nutrova Calcium+Magnesium": 850,
+  "Nutrova Multivitamin For Women": 710,
+  "Nutrova Multivitamin For Men": 710,
+  "Nutrova Elderberry Plus": 760,
+  "Nutrova Functional Fibre - Unflavoured": 800,
+  "Nutrova Functional Fibre - Lemon Flavour": 800,
+};
+const orderTotal = (items: OrderItem[]) => items.reduce((s, i) => s + (Number(i.qty) || 0) * (Number(i.rate) || 0), 0);
+const orderQty = (items: OrderItem[]) => items.reduce((s, i) => s + (Number(i.qty) || 0), 0);
+const normPay = (p: Partial<Payment>): Payment => ({
+  id: String(p.id || Math.random().toString(36).slice(2, 10)),
+  invoiceNo: String(p.invoiceNo || ""),
+  orderDate: String(p.orderDate || ""),
+  items: Array.isArray(p.items) ? p.items.map((i) => ({ product: String(i.product || ""), qty: Number(i.qty) || 0, rate: Number(i.rate) || 0 })) : [],
+  doctorName: String(p.doctorName || ""),
+  doctorArea: String(p.doctorArea || ""),
+  purpose: String(p.purpose || ""),
+  amount: Number(p.amount) || 0,
+  dueDate: String(p.dueDate || ""),
+  paidDate: String(p.paidDate || ""),
+  status: (p.status as PaymentStatus) || "pending",
+  mode: String(p.mode || "UPI"),
+});
 
 /* migrate old short names -> new full names from sheet */
 const PRODUCT_MIGRATION: Record<string, string> = {
@@ -356,7 +452,7 @@ const fmtDayName = (iso: string) => {
   return new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short" });
 };
 const inr = (n: number) => "₹" + Number(n || 0).toLocaleString("en-IN");
-const genInvoiceNo = () => `INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+const genInvoiceNo = () => `PO-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
 const initials = (name: string) =>
   name
     .replace(/^Dr\.\s*/i, "")
@@ -374,23 +470,48 @@ const fmtTime = (t: string) => {
   return `${hr}:${String(m).padStart(2, "0")} ${am}`;
 };
 
-function useLocal<T>(key: string, seed: () => T) {
+/* Online-synced state: the backend (online store) is the source of truth when connected;
+   localStorage is only a fast offline cache. Writes are debounced so typing stays smooth. */
+interface SyncCtx {
+  remote: Record<string, unknown> | null;
+  canSave: boolean;
+  push: (key: string, value: unknown) => void;
+}
+const STORE_KEYS = ["nutrova-bio-v1", "nutrova-doctors-v3", "nutrova-patches-v2", "nutrova-reminders-v1", "nutrova-payments-v3"];
+
+function useSynced<T>(key: string, seed: () => T, sync: SyncCtx, norm?: (v: T) => T) {
   const [value, setValue] = useState<T>(() => {
     try {
       const raw = localStorage.getItem(key);
-      if (raw) return JSON.parse(raw) as T;
+      if (raw) {
+        const v = JSON.parse(raw) as T;
+        return norm ? norm(v) : v;
+      }
     } catch {
       /* ignore */
     }
     return seed();
   });
+  const ref = useRef(sync);
+  ref.current = sync;
   useEffect(() => {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch {
-      /* ignore */
+    if (sync.remote && key in sync.remote) {
+      const v = sync.remote[key] as T;
+      setValue(norm ? norm(v) : v);
     }
-  }, [key, value]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.remote]);
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch {
+        /* ignore */
+      }
+      if (ref.current.canSave) ref.current.push(key, value);
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [key, value, sync.canSave]);
   return [value, setValue] as const;
 }
 
@@ -468,13 +589,61 @@ function describeTime(d: Doctor): string {
 
 const seedBio = (): Bio => ({
   name: "Divakar Reddy",
-  role: "Medical Representative",
+  role: "Business Development Manager",
   city: "Bangalore",
   state: "Karnataka",
   hq: "Bangalore",
   phone: "",
   email: "divakar.reddy@nutrova.com",
 });
+
+/* App creator — highlighted on the login screen */
+const APP_OWNER = { name: "M Divakar Reddy", role: "Business Development Manager", hq: "Bangalore 2" };
+
+/* Project-wide rename of the old role title to "Business Development Manager" */
+const renameRole = (s: string) =>
+  (s || "")
+    .replace(/medical\s+representatives/gi, "Business Development Managers")
+    .replace(/medical\s+representative/gi, "Business Development Manager")
+    .replace(/\bmedical\s+reps\b/gi, "Business Development Managers")
+    .replace(/\bmedical\s+rep\b/gi, "Business Development Manager");
+
+/* Display first name — skips a leading initial, so "M Divakar Reddy" greets as "Divakar" */
+const firstName = (name: string) => {
+  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+  return parts.find((p) => p.replace(/\./g, "").length > 1) || parts[0] || "";
+};
+
+/* One-time profile updates — each runs only once, so later edits in the Bio tab stick:
+   rev 2 — creator's own account (name contains "Divakar"): old default name / HQ → M Divakar Reddy · Bangalore 2 HQ
+   rev 3 — every profile: role title renamed to "Business Development Manager" */
+const BIO_REV = 3;
+const normBio = (b: Bio): Bio => {
+  if (!b || typeof b !== "object") return seedBio();
+  const rev = b.rev || 0;
+  if (rev >= BIO_REV) return b;
+  const out: Bio = { ...b, rev: BIO_REV };
+  out.role = renameRole(out.role) || APP_OWNER.role;
+  if (rev < 2 && /divakar/i.test(out.name || "")) {
+    if (/^\s*divakar\s+reddy\s*$/i.test(out.name)) out.name = APP_OWNER.name;
+    if (!out.hq || out.hq === "Bangalore") out.hq = APP_OWNER.hq;
+  }
+  return out;
+};
+
+/* Sample appointment notes written by the app used the short form of the old title — update them.
+   Exact matches only: notes you typed yourself are never changed. */
+const OLD_SAMPLE_NOTES: Record<string, string> = {
+  "Call previous evening to block MR slot": "Call previous evening to block the BDM slot",
+  "PA allots Friday 10–12 MR window": "PA allots Friday 10–12 BDM window",
+};
+const normDoctors = (arr: Doctor[]): Doctor[] =>
+  Array.isArray(arr)
+    ? arr.map((d) => {
+        const fixed = d ? OLD_SAMPLE_NOTES[d.appointmentNote] : undefined;
+        return fixed ? { ...d, appointmentNote: fixed } : d;
+      })
+    : [];
 
 /* Patches are area names only */
 const seedPatches = (): Patch[] => {
@@ -515,9 +684,9 @@ const seedPatches = (): Patch[] => {
 
 const freshDoctors = (): Doctor[] => [
   { id: "d1", name: "Dr. Ananya Sharma", specialty: "Cosmetic Dermatologist", qualification: "MBBS, MD Derma", clinic: "SkinGlow Aesthetics", area: "Koramangala", patchId: "a1", city: "Bangalore", phone: "98450 12345", email: "ananya.sharma@skinglow.in", frequency: "Weekly", lastVisit: addDays(-2), nextVisit: todayISO(), notes: "Prefers Nutrova samples on Tuesday mornings. Strong Rx for derma-nutrition range.", priority: "High", callDays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], monthlyCalls: [], callTimeFrom: "10:30", callTimeTo: "13:30", focusProducts: ["Nutrova Collagen+Antioxidants (Cranberry Flavour)", "Nutrova Kerastrength"], followProducts: ["Nutrova Marine Collagen Peptides"], appointmentModes: ["Walk-in", "Reception / Front Desk"], appointmentContact: "Reception", appointmentPhone: "080 4111 2233", appointmentLead: "Same day", appointmentNote: "Walk in before 11 AM, inform front desk" },
-  { id: "d2", name: "Dr. Meera Iyer", specialty: "Dermatologist", qualification: "MBBS, DDVL", clinic: "DermaCare Clinic", area: "HSR Layout", patchId: "a2", city: "Bangalore", phone: "98860 23456", email: "", frequency: "Weekly", lastVisit: addDays(-6), nextVisit: addDays(1), notes: "High prescriber — gives calls Tue to Fri only.", priority: "High", callDays: ["Tue", "Wed", "Thu", "Fri"], monthlyCalls: [], callTimeFrom: "11:00", callTimeTo: "14:00", focusProducts: ["Nutrova Kerastrength", "Nutrova Akniflora"], followProducts: ["Nutrova Complete Omega 3"], appointmentModes: ["Phone Call", "Prior Appointment"], appointmentContact: "Clinic Manager", appointmentPhone: "98860 23456", appointmentLead: "1 day before", appointmentNote: "Call previous evening to block MR slot" },
+  { id: "d2", name: "Dr. Meera Iyer", specialty: "Dermatologist", qualification: "MBBS, DDVL", clinic: "DermaCare Clinic", area: "HSR Layout", patchId: "a2", city: "Bangalore", phone: "98860 23456", email: "", frequency: "Weekly", lastVisit: addDays(-6), nextVisit: addDays(1), notes: "High prescriber — gives calls Tue to Fri only.", priority: "High", callDays: ["Tue", "Wed", "Thu", "Fri"], monthlyCalls: [], callTimeFrom: "11:00", callTimeTo: "14:00", focusProducts: ["Nutrova Kerastrength", "Nutrova Akniflora"], followProducts: ["Nutrova Complete Omega 3"], appointmentModes: ["Phone Call", "Prior Appointment"], appointmentContact: "Clinic Manager", appointmentPhone: "98860 23456", appointmentLead: "1 day before", appointmentNote: "Call previous evening to block the BDM slot" },
   { id: "d3", name: "Dr. Priya Nair", specialty: "Aesthetic", qualification: "MBBS, FAM", clinic: "Lumière Aesthetic Studio", area: "Indiranagar", patchId: "a4", city: "Bangalore", phone: "97420 34567", email: "", frequency: "Fortnightly", lastVisit: addDays(-4), nextVisit: todayISO(), notes: "Only Tuesday OPD + 1st Thursday aesthetic camp.", priority: "Medium", callDays: ["Tue"], monthlyCalls: ["1st Thursday"], callTimeFrom: "12:00", callTimeTo: "16:00", focusProducts: ["Nutrova Collagen+Antioxidants (Watermelon Flavour - Zero Sugar)", "Nutrova Poultry Collagen Peptides"], followProducts: ["Nutrova Glutalume"], appointmentModes: ["WhatsApp", "Prior Appointment"], appointmentContact: "Dr. Priya (direct)", appointmentPhone: "97420 34567", appointmentLead: "2–3 days before", appointmentNote: "WhatsApp Tue slot request, confirm Monday" },
-  { id: "d4", name: "Dr. Vikram Malhotra", specialty: "Plastic Surgeon", qualification: "MBBS, MS, MCh Plastic", clinic: "Renew Plastic Surgery Centre", area: "Whitefield", patchId: "a5", city: "Bangalore", phone: "99010 45678", email: "", frequency: "Monthly", lastVisit: addDays(-7), nextVisit: addDays(2), notes: "Only Friday calls + last Thursday OT review meet.", priority: "Medium", callDays: ["Fri"], monthlyCalls: ["Last Thursday"], callTimeFrom: "10:00", callTimeTo: "12:00", focusProducts: ["Nutrova Poultry Collagen Peptides", "Nutrova Whey Protein Isolate - Dark Chocolate Flavour"], followProducts: ["Nutrova Magnesium+D3"], appointmentModes: ["Secretary / PA", "Prior Appointment"], appointmentContact: "Arun (PA)", appointmentPhone: "99010 45679", appointmentLead: "Weekly slot", appointmentNote: "PA allots Friday 10–12 MR window" },
+  { id: "d4", name: "Dr. Vikram Malhotra", specialty: "Plastic Surgeon", qualification: "MBBS, MS, MCh Plastic", clinic: "Renew Plastic Surgery Centre", area: "Whitefield", patchId: "a5", city: "Bangalore", phone: "99010 45678", email: "", frequency: "Monthly", lastVisit: addDays(-7), nextVisit: addDays(2), notes: "Only Friday calls + last Thursday OT review meet.", priority: "Medium", callDays: ["Fri"], monthlyCalls: ["Last Thursday"], callTimeFrom: "10:00", callTimeTo: "12:00", focusProducts: ["Nutrova Poultry Collagen Peptides", "Nutrova Whey Protein Isolate - Dark Chocolate Flavour"], followProducts: ["Nutrova Magnesium+D3"], appointmentModes: ["Secretary / PA", "Prior Appointment"], appointmentContact: "Arun (PA)", appointmentPhone: "99010 45679", appointmentLead: "Weekly slot", appointmentNote: "PA allots Friday 10–12 BDM window" },
   { id: "d5", name: "Dr. Sneha Kulkarni", specialty: "Cosmetic Dermatologist", qualification: "MBBS, MD DVL", clinic: "Radiance Skin & Hair", area: "Jayanagar", patchId: "a3", city: "Bangalore", phone: "96200 56789", email: "", frequency: "Weekly", lastVisit: addDays(-9), nextVisit: addDays(3), notes: "Mon–Fri OPD + 1st Tuesday seminar day.", priority: "Medium", callDays: ["Mon", "Tue", "Wed", "Thu", "Fri"], monthlyCalls: ["1st Tuesday"], callTimeFrom: "09:30", callTimeTo: "12:30", focusProducts: ["Nutrova Marine Collagen Peptides", "Nutrova Multivitamin For Women"], followProducts: ["Nutrova Calcium+Magnesium"], appointmentModes: ["Reception / Front Desk", "Phone Call"], appointmentContact: "Front Desk", appointmentPhone: "080 2666 7788", appointmentLead: "Before 20th of month", appointmentNote: "Book next month slot before 20th" },
   { id: "d6", name: "Dr. Arjun Desai", specialty: "Dermatologist", qualification: "MBBS, DDV", clinic: "ClearSkin Clinic", area: "Malleshwaram", patchId: "a6", city: "Bangalore", phone: "98110 67890", email: "", frequency: "Weekly", lastVisit: addDays(-1), nextVisit: addDays(6), notes: "Mon–Sat OPD, walk-in mornings.", priority: "Low", callDays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], monthlyCalls: [], callTimeFrom: "10:00", callTimeTo: "13:00", focusProducts: ["Nutrova Kerastrength", "Nutrova Functional Fibre - Unflavoured"], followProducts: ["Nutrova Caroshield"], appointmentModes: ["Walk-in"], appointmentContact: "", appointmentPhone: "", appointmentLead: "Same day", appointmentNote: "Direct walk-in, no prior booking" },
   { id: "d7", name: "Dr. Kavya Reddy", specialty: "Aesthetic", qualification: "MBBS, PGDCC", clinic: "Aurelle Aesthetics", area: "Electronic City", patchId: "a8", city: "Bangalore", phone: "97310 78901", email: "", frequency: "Monthly", lastVisit: addDays(-12), nextVisit: addDays(5), notes: "Prospect — meets Tue/Thu/Sat + 1st Tue & 3rd Thu camps.", priority: "High", callDays: ["Tue", "Thu", "Sat"], monthlyCalls: ["1st Tuesday", "3rd Thursday"], callTimeFrom: "15:00", callTimeTo: "18:00", focusProducts: ["Nutrova Collagen+Antioxidants (Cranberry Flavour)", "Nutrova Melatace"], followProducts: ["Nutrova Vegan Protein - Mango Flavour", "Nutrova Complete Omega 3"], appointmentModes: ["WhatsApp", "Phone Call"], appointmentContact: "Kavya Clinic", appointmentPhone: "97310 78901", appointmentLead: "Before 25th of month", appointmentNote: "Share agenda on WhatsApp first, book before 25th" },
@@ -581,33 +750,36 @@ const seedReminders = (): Reminder[] => [
 ];
 
 const seedPayments = (): Payment[] => {
-  try {
-    const raw = localStorage.getItem("nutrova-payments-v1");
-    if (raw) {
-      const old = JSON.parse(raw);
-      if (Array.isArray(old) && old.length > 0) {
-        return old.map((p: Partial<Payment>, i: number) => ({
-          id: String(p.id || uid()),
-          invoiceNo: String(p.invoiceNo || `INV-${new Date().getFullYear()}-${1040 + i}`),
-          doctorName: String(p.doctorName || ""),
-          doctorArea: String(p.doctorArea || ""),
-          purpose: String(p.purpose || ""),
-          amount: Number(p.amount || 0),
-          dueDate: String(p.dueDate || ""),
-          paidDate: String(p.paidDate || ""),
-          status: (p.status as PaymentStatus) || "pending",
-          mode: String(p.mode || "UPI"),
-        }));
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return [
-    { id: "p1", invoiceNo: `INV-${new Date().getFullYear()}-1041`, doctorName: "Dr. Meera Iyer", doctorArea: "HSR Layout", purpose: "CME sponsorship — Derma meet", amount: 15000, dueDate: addDays(-2), paidDate: "", status: "pending", mode: "UPI" },
-    { id: "p2", invoiceNo: `INV-${new Date().getFullYear()}-1042`, doctorName: "Dr. Priya Nair", doctorArea: "Indiranagar", purpose: "Sample stock settlement", amount: 8500, dueDate: addDays(3), paidDate: "", status: "pending", mode: "Bank Transfer" },
-    { id: "p3", invoiceNo: `INV-${new Date().getFullYear()}-1039`, doctorName: "Dr. Ananya Sharma", doctorArea: "Koramangala", purpose: "Conference registration support", amount: 22000, dueDate: addDays(-10), paidDate: addDays(-9), status: "paid", mode: "Cheque" },
+  const yr = new Date().getFullYear();
+  const samples: Payment[] = [
+    normPay({ id: "p1", invoiceNo: `PO-${yr}-1041`, orderDate: addDays(-12), doctorName: "Dr. Meera Iyer", doctorArea: "HSR Layout", purpose: "Clinic stock order", items: [{ product: "Nutrova Kerastrength", qty: 10, rate: 1070 }, { product: "Nutrova Complete Omega 3", qty: 4, rate: 1070 }], amount: 14980, dueDate: addDays(-2), status: "pending", mode: "UPI" }),
+    normPay({ id: "p2", invoiceNo: `PO-${yr}-1042`, orderDate: addDays(-4), doctorName: "Dr. Priya Nair", doctorArea: "Indiranagar", purpose: "Aesthetic studio order", items: [{ product: "Nutrova Collagen+Antioxidants (Cranberry Flavour)", qty: 2, rate: 2575 }, { product: "Nutrova Poultry Collagen Peptides", qty: 1, rate: 3120 }], amount: 8270, dueDate: addDays(3), status: "pending", mode: "Bank Transfer" }),
+    normPay({ id: "p3", invoiceNo: `PO-${yr}-1039`, orderDate: addDays(-20), doctorName: "Dr. Ananya Sharma", doctorArea: "Koramangala", purpose: "Monthly derma-nutrition order", items: [{ product: "Nutrova Marine Collagen Peptides", qty: 6, rate: 2140 }, { product: "Nutrova Kerastrength", qty: 8, rate: 1070 }], amount: 21400, dueDate: addDays(-10), paidDate: addDays(-9), status: "paid", mode: "Cheque" }),
+    normPay({ id: "p4", invoiceNo: `PO-${yr}-1031`, orderDate: addDays(-60), doctorName: "Dr. Vikram Malhotra", doctorArea: "Whitefield", purpose: "Post-op nutrition range", items: [{ product: "Nutrova Whey Protein Isolate - Dark Chocolate Flavour", qty: 5, rate: 1800 }], amount: 9000, dueDate: addDays(-45), status: "pending", mode: "Cheque" }),
+    normPay({ id: "p5", invoiceNo: `PO-${yr}-1036`, orderDate: addDays(-35), doctorName: "Dr. Farhan Khan", doctorArea: "Peenya", purpose: "Clinic stock order", items: [{ product: "Nutrova Poultry Collagen Peptides", qty: 2, rate: 3120 }, { product: "Nutrova Whey Protein Isolate - Vanilla Flavour", qty: 2, rate: 1800 }], amount: 9840, dueDate: addDays(-20), status: "pending", mode: "UPI" }),
   ];
+  /* keep anything the user added themselves in older versions */
+  const extra: Payment[] = [];
+  for (const key of ["nutrova-payments-v2", "nutrova-payments-v1"]) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const old = JSON.parse(raw);
+        if (Array.isArray(old)) {
+          old.forEach((p: Partial<Payment>, i: number) => {
+            if (["p1", "p2", "p3"].includes(String(p.id))) return;
+            const n = normPay(p);
+            if (!n.invoiceNo) n.invoiceNo = `PO-${yr}-${1000 + i}`;
+            extra.push(n);
+          });
+          break;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return [...samples, ...extra];
 };
 
 const KIND_COLORS: Record<ReminderKind, string> = {
@@ -631,24 +803,96 @@ const emptyDoctor = (): Doctor => ({
   appointmentModes: [], appointmentContact: "", appointmentPhone: "", appointmentLead: "Same day", appointmentNote: "",
 });
 const emptyReminder = (): Reminder => ({ id: uid(), doctorName: "", doctorArea: "", title: "", date: todayISO(), time: "10:00", kind: "Visit", notes: "", done: false });
-const emptyPayment = (): Payment => ({ id: uid(), invoiceNo: genInvoiceNo(), doctorName: "", doctorArea: "", purpose: "", amount: 0, dueDate: todayISO(), paidDate: "", status: "pending", mode: "UPI" });
+const emptyPayment = (): Payment => ({ id: uid(), invoiceNo: genInvoiceNo(), orderDate: todayISO(), items: [{ product: "", qty: 1, rate: 0 }], doctorName: "", doctorArea: "", purpose: "", amount: 0, dueDate: addDays(30), paidDate: "", status: "pending", mode: "UPI" });
 
 export default function App() {
-  const [signedIn, setSignedIn] = useState(false);
+  /* Auth — first time shows an empty login screen, then stays signed in until Sign out */
+  const [users, setUsers] = useState<AppUser[]>(() => loadUsers());
+  const [sessionEmail, setSessionEmail] = useState<string>(() => loadSessionEmail());
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [showLoginPass, setShowLoginPass] = useState(false);
   const [signupName, setSignupName] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [bio, setBio] = useLocal<Bio>("nutrova-bio-v1", seedBio);
-  const [doctors, setDoctors] = useLocal<Doctor[]>("nutrova-doctors-v3", seedDoctors);
-  const [patches, setPatches] = useLocal<Patch[]>("nutrova-patches-v2", seedPatches);
-  const [reminders, setReminders] = useLocal<Reminder[]>("nutrova-reminders-v1", seedReminders);
-  const [payments, setPayments] = useLocal<Payment[]>("nutrova-payments-v2", seedPayments);
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [signupConfirm, setSignupConfirm] = useState("");
+  const [showSignupPass, setShowSignupPass] = useState(false);
+  const [showSignupConfirm, setShowSignupConfirm] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  /* ---------- Online store (backend) ---------- */
+  const [cfg, setCfg] = useState<BackendConfig | null>(() => readConfig());
+  const online = !!cfg;
+  const [session, setSession] = useState<BackendSession | null>(() => (readConfig() ? loadSession() : null));
+  const [remote, setRemote] = useState<Record<string, unknown> | null>(null);
+  const [syncState, setSyncState] = useState<"idle" | "loading" | "synced" | "error">("idle");
+  const [syncError, setSyncError] = useState("");
+  const [retryTick, setRetryTick] = useState(0);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authInfo, setAuthInfo] = useState("");
+
+  useEffect(() => {
+    if (!cfg || !session) {
+      setRemote(null);
+      setSyncState("idle");
+      return;
+    }
+    let cancelled = false;
+    setSyncState("loading");
+    setSyncError("");
+    fetchAll(cfg)
+      .then((map) => {
+        if (cancelled) return;
+        setRemote(map);
+        setSyncState("synced");
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setSyncState("error");
+        setSyncError(e instanceof Error ? e.message : "Could not load from online store");
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg, session?.email, retryTick]);
+
+  const syncCtx = useMemo<SyncCtx>(
+    () => ({
+      remote,
+      canSave: online && !!session && remote !== null,
+      push: (key, value) => {
+        if (!cfg) return;
+        saveKey(cfg, key, value)
+          .then(() => setSyncState("synced"))
+          .catch((e) => {
+            setSyncState("error");
+            setSyncError(e instanceof Error ? e.message : "Could not save to online store");
+          });
+      },
+    }),
+    [remote, online, session, cfg]
+  );
+
+  const [bio, setBio] = useSynced<Bio>("nutrova-bio-v1", seedBio, syncCtx, normBio);
+  const [doctors, setDoctors] = useSynced<Doctor[]>("nutrova-doctors-v3", seedDoctors, syncCtx, normDoctors);
+  const [patches, setPatches] = useSynced<Patch[]>("nutrova-patches-v2", seedPatches, syncCtx);
+  const [reminders, setReminders] = useSynced<Reminder[]>("nutrova-reminders-v1", seedReminders, syncCtx);
+  const [payments, setPayments] = useSynced<Payment[]>("nutrova-payments-v3", seedPayments, syncCtx, (arr) => (Array.isArray(arr) ? arr.map(normPay) : []));
+
+  const signedIn = online ? !!session : !!sessionEmail;
+  const currentEmail = online ? session?.email || "" : sessionEmail;
 
   const [bioDraft, setBioDraft] = useState<Bio>(bio);
-  useEffect(() => setBioDraft(bio), [signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => setBioDraft(bio), [currentEmail, bio]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* persist local-mode users (only used while no online store is connected) */
+  useEffect(() => {
+    try { localStorage.setItem(AUTH_USERS_KEY, JSON.stringify(users)); } catch { /* ignore */ }
+  }, [users]);
 
   /* one-time reconcile: link doctors to area patches + migrate products + appointment defaults */
   useEffect(() => {
@@ -715,33 +959,143 @@ export default function App() {
     window.setTimeout(() => setToast(null), 2600);
   };
 
-  const shareApp = async () => {
-    const url = window.location.origin;
-    const shareData = {
-      title: "Nutrova Doctor Tracker",
-      text: "Track doctor visits, reminders and payments with Nutrova Doctor Tracker.",
-      url,
-    };
-    if (navigator.share) {
-      try {
-        await navigator.share(shareData);
-      } catch (err) {
-        if ((err as DOMException)?.name !== "AbortError") showToast("Could not share the app", "info");
+  /* ---------- auth handlers: online store first, local fallback when not connected ---------- */
+  const persistSession = (email: string) => {
+    try {
+      if (email) localStorage.setItem(AUTH_SESSION_KEY, email);
+      else localStorage.removeItem(AUTH_SESSION_KEY);
+    } catch { /* ignore */ }
+    setSessionEmail(email);
+  };
+  const handleLoginLocal = () => {
+    const email = loginEmail.trim().toLowerCase();
+    setAuthError("");
+    if (!email) return setAuthError("Please enter work email");
+    if (!loginPassword) return setAuthError("Please enter password");
+    const found = users.find((u) => u.email.toLowerCase() === email);
+    if (!found) return setAuthError("Account not found — please Create account first");
+    if (found.pass !== loginPassword) return setAuthError("Wrong password — try again");
+    persistSession(found.email);
+    setBio((b) => ({ ...b, email: found.email }));
+    setLoginPassword("");
+    setShowLoginPass(false);
+    showToast(`Welcome back${firstName(found.name) ? ", " + firstName(found.name) : ""} — stays signed in`);
+  };
+  const handleSignupLocal = () => {
+    const name = signupName.trim();
+    const email = signupEmail.trim().toLowerCase();
+    const nu: AppUser = { name, email, pass: signupPassword, createdAt: new Date().toISOString() };
+    setUsers((prev) => [...prev, nu]);
+    persistSession(email);
+    setBio((b) => normBio({ ...b, email, name }));
+    setSignupPassword(""); setSignupConfirm("");
+    setShowSignupPass(false); setShowSignupConfirm(false);
+    showToast(`Account created — welcome, ${firstName(name)}!`);
+  };
+  const handleLogin = async () => {
+    if (!online || !cfg) return handleLoginLocal();
+    const email = loginEmail.trim().toLowerCase();
+    setAuthError(""); setAuthInfo("");
+    if (!email) return setAuthError("Please enter work email");
+    if (!loginPassword) return setAuthError("Please enter password");
+    setAuthBusy(true);
+    try {
+      const s = await signInRemote(cfg, email, loginPassword);
+      setSession(s);
+      setLoginPassword("");
+      setShowLoginPass(false);
+      showToast(`Welcome back${firstName(s.name) ? ", " + firstName(s.name) : ""} — stays signed in`);
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : "Sign in failed");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+  const handleSignup = async () => {
+    const name = signupName.trim();
+    const email = signupEmail.trim().toLowerCase();
+    setAuthError(""); setAuthInfo("");
+    if (!name) return setAuthError("Please enter full name");
+    if (!email || !email.includes("@")) return setAuthError("Please enter valid work email");
+    if (!signupPassword || signupPassword.length < 6) return setAuthError("Password must be 6+ characters");
+    if (signupPassword !== signupConfirm) return setAuthError("Passwords do not match");
+    if (!online || !cfg) {
+      if (users.some((u) => u.email.toLowerCase() === email)) return setAuthError("Account already exists — please Sign in");
+      return handleSignupLocal();
+    }
+    setAuthBusy(true);
+    try {
+      const r = await signUpRemote(cfg, name, email, signupPassword);
+      if (r.session) {
+        setBio((b) => normBio({ ...b, email, name }));
+        setSession(r.session);
+        setSignupPassword(""); setSignupConfirm("");
+        showToast(`Account created online — welcome, ${firstName(name)}!`);
+      } else {
+        setAuthInfo("Account created. Open the confirmation email we sent, then come back and Sign in.");
+        setAuthMode("login");
+        setLoginEmail(email);
       }
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : "Could not create account");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+  const doSignOut = () => {
+    if (online) {
+      /* clear the cached copy so the next person on this phone never sees this account's data */
+      clearSession();
+      try { STORE_KEYS.forEach((k) => localStorage.removeItem(k)); } catch { /* ignore */ }
+      window.location.reload();
       return;
     }
+    persistSession("");
+    goTo("dashboard");
+  };
+  const handleSignOut = () => {
+    askConfirm({
+      title: "Sign out?",
+      label: currentEmail || "your account",
+      detail: online
+        ? "You will see the login screen next time. Everything is safe in the online store — sign in on any phone to get it back."
+        : "You will see the login screen next time. Your data stays on this device.",
+      confirmText: "Yes, sign out",
+      onYes: () => { closeConfirm(); doSignOut(); },
+    });
+  };
+  const appShareUrl =
+    typeof window !== "undefined"
+      ? window.location.origin + window.location.pathname + (cfg ? shareHash(cfg) : "")
+      : "Nutrova Doctor Tracker";
+  const appShareText = "Nutrova Doctor Tracker — Business Development Manager app for doctors, calls, reminders, purchase orders & payments";
+  const handleNativeShare = async () => {
+    const data = { title: "Nutrova Doctor Tracker", text: appShareText, url: appShareUrl };
     try {
-      await navigator.clipboard.writeText(url);
-      showToast("App link copied to clipboard");
-    } catch {
-      showToast(`Share this link: ${url}`, "info");
-    }
+      if ((navigator as unknown as { share?: (d: typeof data) => Promise<void> }).share) {
+        await (navigator as unknown as { share: (d: typeof data) => Promise<void> }).share(data);
+        showToast("Shared successfully");
+      } else {
+        await navigator.clipboard.writeText(`${appShareText}\n${appShareUrl}`);
+        setShareCopied(true);
+        showToast("Link copied — paste in WhatsApp");
+        setTimeout(() => setShareCopied(false), 2000);
+      }
+    } catch { /* user cancelled */ }
+  };
+  const handleCopyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(appShareUrl);
+      setShareCopied(true);
+      showToast("App link copied");
+      setTimeout(() => setShareCopied(false), 2000);
+    } catch { setAuthError("Copy failed — long-press link to copy"); }
   };
 
   /* tab navigation — each tab is its own separate page (Bio shifted out of Dashboard) */
   const goTo = (id: Tab) => {
     setActiveTab(id);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.scrollTo({ top: 0, behavior: "auto" });
   };
 
   /* frozen header shadow + compact mode */
@@ -805,7 +1159,7 @@ export default function App() {
     else if (payPendingBucket === "30plus") list = list.filter((p) => p.status !== "paid" && daysOverdue(p.dueDate) > 30);
     /* payment search */
     const q = paySearch.trim().toLowerCase();
-    if (q) list = list.filter((p) => [p.doctorName, p.doctorArea, p.invoiceNo, p.purpose, p.mode, String(p.amount)].join(" ").toLowerCase().includes(q));
+    if (q) list = list.filter((p) => [p.doctorName, p.doctorArea, p.invoiceNo, p.purpose, p.mode, String(p.amount), p.items.map((i) => i.product).join(" ")].join(" ").toLowerCase().includes(q));
     /* sort */
     if (paySort === "mostPending") list.sort((a, b) => daysOverdue(b.dueDate) - daysOverdue(a.dueDate) || a.dueDate.localeCompare(b.dueDate));
     else if (paySort === "amountHigh") list.sort((a, b) => b.amount - a.amount);
@@ -1004,7 +1358,8 @@ export default function App() {
     if (!p.doctorName.trim()) return showToast("Please select a doctor", "info");
     if (!p.amount || p.amount <= 0) return showToast("Enter a valid amount", "info");
     const status: PaymentStatus = p.status === "paid" ? "paid" : isCriticalOverdue(p.dueDate) ? "overdue" : "pending";
-    const rec = { ...p, invoiceNo: p.invoiceNo.trim() || genInvoiceNo(), status, paidDate: p.status === "paid" ? p.paidDate || todayISO() : "" };
+    const cleanItems = (p.items || []).filter((i) => i.product && Number(i.qty) > 0).map((i) => ({ product: i.product, qty: Number(i.qty), rate: Number(i.rate) || 0 }));
+    const rec = { ...p, items: cleanItems, invoiceNo: p.invoiceNo.trim() || genInvoiceNo(), status, paidDate: p.status === "paid" ? p.paidDate || todayISO() : "" };
     if (paymentModal.editing) setPayments((prev) => prev.map((x) => (x.id === rec.id ? rec : x)));
     else setPayments((prev) => [{ ...rec, id: uid() }, ...prev]);
     setPaymentModal({ open: false, draft: emptyPayment(), editing: false });
@@ -1013,7 +1368,7 @@ export default function App() {
 
   const deleteInvoice = (p: Payment) => {
     askConfirm({
-      title: "Delete invoice?",
+      title: "Delete purchase order?",
       label: `${p.invoiceNo} · ${inr(p.amount)}`,
       detail: `${p.doctorName}${p.purpose ? ` — ${p.purpose}` : ""}`,
       confirmText: "Yes, delete invoice",
@@ -1038,6 +1393,19 @@ export default function App() {
         closeConfirm();
       },
     });
+  };
+
+  /* purchase-order lines: picking a product fills its nutrova.com rate; total is calculated automatically */
+  const setPayItems = (items: OrderItem[]) =>
+    setPaymentModal((m) => ({ ...m, draft: { ...m.draft, items, amount: items.some((i) => i.product) ? orderTotal(items) : m.draft.amount } }));
+  const updatePayItem = (idx: number, patch: Partial<OrderItem>) =>
+    setPayItems(paymentModal.draft.items.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  const pickPayProduct = (idx: number, product: string) =>
+    updatePayItem(idx, { product, rate: DEFAULT_RATES[product] ?? paymentModal.draft.items[idx]?.rate ?? 0 });
+  const addPayItem = () => setPayItems([...paymentModal.draft.items, { product: "", qty: 1, rate: 0 }]);
+  const removePayItem = (idx: number) => {
+    const next = paymentModal.draft.items.filter((_, i) => i !== idx);
+    setPayItems(next.length ? next : [{ product: "", qty: 1, rate: 0 }]);
   };
 
   const markPaid = (p: Payment) => {
@@ -1089,12 +1457,13 @@ export default function App() {
 
   const exportPayments = () => {
     if (filteredPayments.length === 0) return showToast("No invoices to download", "info");
-    const header = ["Invoice No", "Doctor", "Area", "Purpose", "Amount (INR)", "Due Date", "Pending Days", "Days Overdue", "Status", "Paid Date", "Mode"];
+    const header = ["PO / Invoice No", "Order Date", "Doctor", "Area", "Products Ordered", "Total Qty", "Note", "Amount (INR)", "Due Date", "Pending Days", "Days Overdue", "Status", "Paid Date", "Mode"];
     const rows = filteredPayments.map((p) => {
       const st = p.status === "paid" ? "paid" : isCriticalOverdue(p.dueDate) ? "overdue (30+ days)" : isPast(p.dueDate) ? `pending (${daysOverdue(p.dueDate)}d)` : "pending";
       const pend = pendingDaysInfo(p);
       return [
-        p.invoiceNo || "", p.doctorName, p.doctorArea || "", p.purpose, String(p.amount),
+        p.invoiceNo || "", p.orderDate ? fmtDate(p.orderDate) : "", p.doctorName, p.doctorArea || "",
+        p.items.map((i) => `${i.product} x${i.qty} @${i.rate}`).join(" | "), String(orderQty(p.items)), p.purpose, String(p.amount),
         p.dueDate ? fmtDate(p.dueDate) : "", pend.text, String(daysOverdue(p.dueDate)), st,
         p.paidDate ? fmtDate(p.paidDate) : "", p.mode,
       ];
@@ -1103,118 +1472,160 @@ export default function App() {
     showToast(`Downloaded ${filteredPayments.length} invoices as CSV`);
   };
 
-  /* ------------------------------- login gate ------------------------------ */
+  /* ---------------- Option B login gate — show/hide + create account + stay logged in ---------------- */
   if (!signedIn) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-6">
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
         <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
-          <div className="bg-emerald-950 px-8 pb-6 pt-8 text-white">
+          <div className="bg-emerald-950 px-6 pb-6 pt-7 text-white sm:px-8 sm:pt-8">
             <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-500/20 ring-1 ring-emerald-400/40">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/20 ring-1 ring-emerald-400/40">
                 <Stethoscope className="h-6 w-6 text-emerald-300" />
               </div>
-              <div>
+              <div className="min-w-0 flex-1">
                 <p className="text-lg font-extrabold leading-tight">Nutrova Doctor Tracker</p>
-                <p className="text-xs text-emerald-200/80">Medical Representative Workspace</p>
+                {/* app creator — simple lines below the title, name highlighted */}
+                <p className="mt-1 text-xs leading-snug text-emerald-200/80">
+                  App created by <span className="font-extrabold uppercase tracking-wide text-amber-300">{APP_OWNER.name}</span>
+                </p>
+                <p className="text-[11px] font-semibold leading-snug text-emerald-100/70">
+                  {APP_OWNER.role} at {APP_OWNER.hq} HQ
+                </p>
               </div>
+            </div>
+
+            <div className="mt-5 grid grid-cols-2 gap-2 rounded-2xl bg-white/10 p-1.5 ring-1 ring-white/15">
+              <button onClick={() => { setAuthMode("login"); setAuthError(""); }} className={`rounded-xl py-2.5 text-sm font-extrabold transition ${authMode === "login" ? "bg-white text-emerald-900 shadow" : "text-emerald-100/70 hover:text-white"}`}>
+                Sign in
+              </button>
+              <button onClick={() => { setAuthMode("signup"); setAuthError(""); }} className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-sm font-extrabold transition ${authMode === "signup" ? "bg-white text-emerald-900 shadow" : "text-emerald-100/70 hover:text-white"}`}>
+                <UserPlus className="h-4 w-4" /> Create account
+              </button>
             </div>
           </div>
-          <form
-            className="space-y-4 px-8 py-7"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const email = loginEmail.trim();
-              if (!email || !email.includes("@")) return showToast("Enter a valid email", "info");
-              if (loginPassword.length < 6) return showToast("Password must be at least 6 characters", "info");
-              if (authMode === "signup") {
-                if (!signupName.trim()) return showToast("Enter your full name", "info");
-                if (loginPassword !== confirmPassword) return showToast("Passwords do not match", "info");
-                setBio((b) => ({ ...b, name: signupName.trim(), email }));
-                setSignedIn(true);
-                showToast(`Account created. Welcome, ${signupName.trim().split(" ")[0]}`);
-                return;
-              }
-              setBio((b) => ({ ...b, email }));
-              setSignedIn(true);
-              showToast(`Welcome back, ${bio.name.split(" ")[0] || "Rep"}`);
-            }}
-          >
-            <div>
-              <h2 className="text-xl font-extrabold text-slate-900">{authMode === "signin" ? "Sign in" : "Create account"}</h2>
-              <p className="mt-1 text-sm text-slate-500">{authMode === "signin" ? "Access your doctor tracker workspace." : "Set up your field rep workspace."}</p>
-            </div>
-            {authMode === "signup" && (
+
+          {/* online store status */}
+          <div className="px-6 pt-4 sm:px-8">
+            {online ? (
+              <p className="flex items-center gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-extrabold text-emerald-800 ring-1 ring-emerald-100">
+                <Cloud className="h-4 w-4 shrink-0" /> Online store connected — your data is saved in the cloud
+              </p>
+            ) : (
+              <button onClick={() => setSetupOpen(true)} className="flex w-full items-center gap-2 rounded-xl bg-amber-50 px-3 py-2 text-left text-[11px] font-extrabold text-amber-900 ring-1 ring-amber-200 transition hover:bg-amber-100">
+                <CloudOff className="h-4 w-4 shrink-0" /> Online store not connected — tap to set up (owner, one time)
+              </button>
+            )}
+          </div>
+
+          {authMode === "login" ? (
+            <div className="space-y-4 px-6 py-6 sm:px-8 sm:py-7">
               <div>
-                <label htmlFor="signup-name" className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Full name</label>
-                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
-                  <User className="h-4 w-4 shrink-0 text-emerald-600" />
-                  <input id="signup-name" value={signupName} onChange={(e) => setSignupName(e.target.value)} autoComplete="name" className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="Your full name" />
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Work email</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <Mail className="h-4 w-4 shrink-0 text-emerald-600" />
+                  <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleLogin()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" autoComplete="email" />
                 </div>
               </div>
-            )}
-            <div>
-              <label htmlFor="login-email" className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Work email</label>
-              <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
-                <Mail className="h-4 w-4 shrink-0 text-emerald-600" />
-                <input id="login-email" type="email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} autoComplete="email" className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" />
-              </div>
-            </div>
-            <div>
-              <label htmlFor="login-password" className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Password</label>
-              <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white py-1.5 pl-4 pr-1.5 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
-                <input
-                  id="login-password"
-                  type={showPassword ? "text" : "password"}
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-                  className="w-full bg-transparent py-1.5 text-sm font-medium text-slate-800 outline-none"
-                  placeholder="••••••••"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? "Hide password" : "Show password"}
-                  aria-pressed={showPassword}
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-emerald-50 hover:text-emerald-700"
-                >
-                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-            </div>
-            {authMode === "signup" && (
               <div>
-                <label htmlFor="confirm-password" className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Confirm password</label>
-                <input
-                  id="confirm-password"
-                  type={showPassword ? "text" : "password"}
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  autoComplete="new-password"
-                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
-                  placeholder="••••••••"
-                />
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Password</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <input type={showLoginPass ? "text" : "password"} value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleLogin()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="••••••••" autoComplete="current-password" />
+                  <button type="button" onClick={() => setShowLoginPass(!showLoginPass)} title={showLoginPass ? "Hide password" : "Show password"} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-emerald-700">
+                    {showLoginPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
               </div>
-            )}
-            <button
-              type="submit"
-              className="w-full rounded-2xl bg-emerald-700 py-3.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99]"
-            >
-              {authMode === "signin" ? "Sign in to Tracker" : "Create account"}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setAuthMode((m) => (m === "signin" ? "signup" : "signin"));
-                setConfirmPassword("");
-              }}
-              className="w-full rounded-2xl border border-emerald-200 py-3 text-sm font-bold text-emerald-800 transition hover:bg-emerald-50"
-            >
-              {authMode === "signin" ? "Create new account" : "Already have an account? Sign in"}
-            </button>
-            <p className="text-center text-xs text-slate-400">Secure workspace for Nutrova field team · Bangalore HQ</p>
-          </form>
+              {authInfo && <p className="rounded-xl bg-emerald-50 px-4 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-200">{authInfo}</p>}
+              {authError && <p className="rounded-xl bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{authError}</p>}
+              <button onClick={handleLogin} disabled={authBusy} className="w-full rounded-2xl bg-emerald-700 py-3.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99] disabled:opacity-60">
+                {authBusy ? "Please wait…" : "Sign in to Tracker"}
+              </button>
+              <p className="rounded-xl bg-emerald-50 px-4 py-2.5 text-center text-[11px] font-bold leading-relaxed text-emerald-800 ring-1 ring-emerald-100">
+                Sign in once — you stay signed in until you tap Sign out.
+              </p>
+              <button onClick={() => setShareOpen(true)} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-100 py-3 text-xs font-extrabold text-slate-600 transition hover:bg-slate-200">
+                <Share2 className="h-4 w-4" /> Share this app with others
+              </button>
+              <p className="text-center text-xs text-slate-400">Secure workspace for Nutrova field team</p>
+            </div>
+          ) : (
+            <div className="space-y-4 px-6 py-6 sm:px-8 sm:py-7">
+              <div>
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Full name</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <User className="h-4 w-4 shrink-0 text-emerald-600" />
+                  <input value={signupName} onChange={(e) => setSignupName(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="Your full name" autoComplete="name" />
+                </div>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Work email</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <Mail className="h-4 w-4 shrink-0 text-slate-400" />
+                  <input value={signupEmail} onChange={(e) => setSignupEmail(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" autoComplete="email" />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Password</label>
+                  <div className="flex items-center gap-1 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                    <input type={showSignupPass ? "text" : "password"} value={signupPassword} onChange={(e) => setSignupPassword(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="6+ chars" autoComplete="new-password" />
+                    <button type="button" onClick={() => setShowSignupPass(!showSignupPass)} title={showSignupPass ? "Hide" : "Show"} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-emerald-700">
+                      {showSignupPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Confirm</label>
+                  <div className="flex items-center gap-1 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                    <input type={showSignupConfirm ? "text" : "password"} value={signupConfirm} onChange={(e) => setSignupConfirm(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSignup()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="Repeat" autoComplete="new-password" />
+                    <button type="button" onClick={() => setShowSignupConfirm(!showSignupConfirm)} title={showSignupConfirm ? "Hide" : "Show"} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-emerald-700">
+                      {showSignupConfirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              {authError && <p className="rounded-xl bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{authError}</p>}
+              <button onClick={handleSignup} disabled={authBusy} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-700 py-3.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99] disabled:opacity-60">
+                <UserPlus className="h-4 w-4" /> {authBusy ? "Please wait…" : "Create account & Sign in"}
+              </button>
+              <button onClick={() => { setAuthMode("login"); setAuthError(""); }} className="w-full text-center text-xs font-bold text-emerald-700 underline-offset-2 hover:underline">
+                Already have account? Sign in
+              </button>
+              <p className="text-center text-[11px] leading-relaxed text-slate-400">
+                {online ? "Your account and data are saved securely in the online store." : "Online store not connected — account saves on this phone only."}
+              </p>
+            </div>
+          )}
         </div>
+        {shareOpen && (
+          <ShareAppDialog
+            url={appShareUrl}
+            text={appShareText}
+            copied={shareCopied}
+            online={online}
+            onClose={() => setShareOpen(false)}
+            onNative={handleNativeShare}
+            onCopy={handleCopyLink}
+          />
+        )}
+        {setupOpen && (
+          <SetupDialog
+            cfg={cfg}
+            onClose={() => setSetupOpen(false)}
+            onSave={(c) => { saveConfig(c); setCfg(c); setSession(null); setSetupOpen(false); showToast("Online store connected"); }}
+            onDisconnect={() => { clearConfig(); setCfg(null); setSession(null); setRemote(null); setSetupOpen(false); showToast("Disconnected — using this phone only", "info"); }}
+          />
+        )}
+        {toast && (
+          <div className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 anim-toast">
+            <div className="flex items-center gap-2.5 rounded-full bg-emerald-950 py-3 pl-4 pr-6 text-sm font-bold text-white shadow-2xl ring-1 ring-white/10">
+              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500">
+                <Check className="h-4 w-4" strokeWidth={3} />
+              </span>
+              {toast.msg}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1238,29 +1649,26 @@ export default function App() {
                 <Stethoscope className={`${frozenScrolled ? "h-5 w-5" : "h-5 w-5 sm:h-6 sm:w-6"} text-emerald-300`} />
               </div>
               <div className="min-w-0 flex-1">
-                <h1 className={`font-extrabold leading-tight tracking-tight transition-all duration-200 ${frozenScrolled ? "text-[15px] sm:text-lg" : "text-[17px] sm:text-2xl"}`}>Nutrova Doctor Tracker</h1>
+                <h1 className={`font-extrabold leading-tight tracking-tight transition-all duration-200 ${frozenScrolled ? "text-[15px] sm:text-lg" : "text-[17px] sm:text-2xl"}`}>
+                  Nutrova Doctor Tracker
+                </h1>
                 {/* tagline — always fully visible, wraps to 2 lines on mobile instead of cutting */}
                 <p className={`text-emerald-100/90 transition-all duration-200 ${frozenScrolled ? "mt-0.5 text-[11px] leading-snug sm:text-xs" : "mt-1 text-xs leading-snug sm:text-sm"}`}>
                   Created by <span className="font-bold text-white underline decoration-emerald-300/60 underline-offset-2">{bio.name || "—"}</span>
-                  <span className="mx-1.5 text-emerald-300/60">·</span><span className="whitespace-nowrap">{bio.role || "Medical Representative"}</span>
+                  <span className="mx-1.5 text-emerald-300/60">·</span><span className="whitespace-nowrap">{bio.role || "Business Development Manager"}</span>
                   <span className="mx-1.5 text-emerald-300/60">·</span><span className="font-bold text-white">Nutrova</span>
                 </p>
               </div>
             </div>
-            <div className="flex shrink-0 items-start gap-2 pt-0.5 sm:gap-3">
+            <div className="flex shrink-0 items-start gap-2 pt-0.5 sm:gap-2">
               <span className="hidden items-center gap-2 pt-2 text-sm font-medium text-emerald-100/90 xl:flex">
                 <Mail className="h-4 w-4 shrink-0 text-emerald-300" />
-                <span className="max-w-[220px] truncate">{bio.email || "—"}</span>
+                <span className="max-w-[180px] truncate">{sessionEmail || bio.email || "—"}</span>
               </span>
-              <button
-                type="button"
-                onClick={shareApp}
-                aria-label="Share app"
-                className={`flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-400 font-bold text-emerald-950 transition hover:bg-emerald-300 sm:gap-2 sm:text-sm ${frozenScrolled ? "px-3 py-1.5 text-xs sm:px-4" : "px-3.5 py-2 text-xs sm:px-5 sm:py-2.5 sm:text-sm"}`}
-              >
-                <Share2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> Share
+              <button onClick={() => setShareOpen(true)} title="Share this app with others" className={`flex shrink-0 items-center gap-1.5 rounded-full bg-amber-400 font-extrabold text-amber-950 shadow transition hover:bg-amber-300 sm:gap-2 sm:text-sm ${frozenScrolled ? "px-3 py-1.5 text-xs sm:px-4" : "px-3.5 py-2 text-xs sm:px-4 sm:py-2.5 sm:text-sm"}`}>
+                <Share2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> <span className="hidden sm:inline">Share</span>
               </button>
-              <button onClick={() => setSignedIn(false)} className={`flex shrink-0 items-center gap-1.5 rounded-full bg-white/10 font-bold text-white ring-1 ring-white/15 transition hover:bg-white/20 sm:gap-2 sm:text-sm ${frozenScrolled ? "px-3 py-1.5 text-xs sm:px-4" : "px-3.5 py-2 text-xs sm:px-5 sm:py-2.5 sm:text-sm"}`}>
+              <button onClick={handleSignOut} className={`flex shrink-0 items-center gap-1.5 rounded-full bg-white/10 font-bold text-white ring-1 ring-white/15 transition hover:bg-white/20 sm:gap-2 sm:text-sm ${frozenScrolled ? "px-3 py-1.5 text-xs sm:px-4" : "px-3.5 py-2 text-xs sm:px-5 sm:py-2.5 sm:text-sm"}`}>
                 <LogOut className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> Sign out
               </button>
             </div>
@@ -1293,6 +1701,26 @@ export default function App() {
       </div>
 
       <main className="mx-auto max-w-7xl px-5 py-8 sm:px-8">
+        {/* online store status banner — only shown when something needs attention */}
+        {!online && (
+          <button onClick={() => setSetupOpen(true)} className="mb-5 flex w-full items-center gap-2.5 rounded-2xl bg-amber-50 px-4 py-3 text-left text-xs font-bold text-amber-900 ring-1 ring-amber-200 transition hover:bg-amber-100">
+            <CloudOff className="h-4 w-4 shrink-0" />
+            <span>Online store not connected — data is saved on this phone only. <span className="underline">Tap to connect</span></span>
+          </button>
+        )}
+        {online && syncState === "loading" && (
+          <p className="mb-5 flex items-center gap-2.5 rounded-2xl bg-slate-50 px-4 py-3 text-xs font-bold text-slate-600 ring-1 ring-slate-200">
+            <Cloud className="h-4 w-4 shrink-0 anim-pulse-soft" /> Loading your data from the online store…
+          </p>
+        )}
+        {online && syncState === "error" && (
+          <div className="mb-5 flex flex-wrap items-center gap-2.5 rounded-2xl bg-rose-50 px-4 py-3 text-xs font-bold text-rose-800 ring-1 ring-rose-200">
+            <CloudOff className="h-4 w-4 shrink-0" />
+            <span className="min-w-0 flex-1">{syncError || "Online store problem"}</span>
+            <button onClick={() => setRetryTick((n) => n + 1)} className="rounded-full bg-rose-600 px-3 py-1 text-white hover:bg-rose-700">Retry</button>
+            <button onClick={() => setSetupOpen(true)} className="rounded-full bg-white px-3 py-1 text-rose-700 ring-1 ring-rose-200 hover:bg-rose-50">Setup</button>
+          </div>
+        )}
         {/* ------------------------------- dashboard ------------------------------ */}
         {activeTab === "dashboard" && (
         <section id="dashboard" key="tab-dashboard" className="anim-fade-up">
@@ -1460,11 +1888,11 @@ export default function App() {
               <div className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-800 px-6 pb-5 pt-6 text-white">
                 <div className="flex items-center gap-4">
                   <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-white/15 text-xl font-extrabold ring-1 ring-white/25">
-                    {initials(bio.name || "MR")}
+                    {initials(bio.name || "Business Development Manager")}
                   </div>
                   <div className="min-w-0">
                     <p className="truncate text-lg font-extrabold leading-tight">{bio.name || "—"}</p>
-                    <p className="truncate text-sm text-emerald-100/80">{bio.role || "Medical Representative"}</p>
+                    <p className="truncate text-sm text-emerald-100/80">{bio.role || "Business Development Manager"}</p>
                     <p className="mt-1 inline-flex items-center gap-1 rounded-full bg-white/15 px-2.5 py-0.5 text-[11px] font-extrabold text-emerald-100 ring-1 ring-white/20">
                       <Building2 className="h-3 w-3" /> Nutrova
                     </p>
@@ -1475,6 +1903,19 @@ export default function App() {
                 <p className="flex items-center gap-2.5 font-medium text-slate-700"><MapPin className="h-4 w-4 shrink-0 text-emerald-600" /> {bio.city || "—"}, {bio.state || "—"} <span className="text-slate-300">·</span> HQ: {bio.hq || "—"}</p>
                 <p className="flex items-center gap-2.5 font-medium text-slate-700"><Phone className="h-4 w-4 shrink-0 text-emerald-600" /> {bio.phone || "Phone not set"}</p>
                 <p className="flex items-center gap-2.5 font-medium text-slate-700"><Mail className="h-4 w-4 shrink-0 text-emerald-600" /> <a href={`mailto:${bio.email}`} className="truncate underline decoration-slate-200 underline-offset-2 hover:text-emerald-700">{bio.email || "—"}</a></p>
+                <p className="flex items-center gap-2.5 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100"><Check className="h-4 w-4 shrink-0" /> Signed in as {currentEmail || bio.email} · stays until Sign out</p>
+                <button onClick={() => setSetupOpen(true)} className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-extrabold ring-1 transition ${online ? (syncState === "error" ? "bg-rose-50 text-rose-800 ring-rose-200" : "bg-sky-50 text-sky-800 ring-sky-100 hover:bg-sky-100") : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"}`}>
+                  {online ? <Cloud className="h-4 w-4 shrink-0" /> : <CloudOff className="h-4 w-4 shrink-0" />}
+                  {online ? (syncState === "error" ? "Online store — problem, tap for details" : syncState === "loading" ? "Online store — syncing…" : "Online store connected · data synced") : "Online store not connected — tap to set up"}
+                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => setShareOpen(true)} className="flex items-center justify-center gap-1.5 rounded-xl bg-amber-400 py-2.5 text-xs font-extrabold text-amber-950 transition hover:bg-amber-300">
+                    <Share2 className="h-3.5 w-3.5" /> Share app
+                  </button>
+                  <button onClick={handleSignOut} className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white py-2.5 text-xs font-extrabold text-slate-600 transition hover:bg-slate-50">
+                    <LogOut className="h-3.5 w-3.5" /> Sign out
+                  </button>
+                </div>
                 <div className="mt-1 grid grid-cols-3 gap-2 border-t border-slate-100 pt-3 text-center">
                   <div className="rounded-2xl bg-emerald-50 px-2 py-2.5 ring-1 ring-emerald-100">
                     <p className="text-lg font-extrabold text-emerald-800">{doctors.length}</p>
@@ -1501,7 +1942,7 @@ export default function App() {
                 </div>
                 <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <BioInput label="Full name" value={bioDraft.name} onChange={(v) => setBioDraft({ ...bioDraft, name: v })} placeholder="Divakar Reddy" />
-                  <BioInput label="Role" value={bioDraft.role} onChange={(v) => setBioDraft({ ...bioDraft, role: v })} placeholder="Medical Representative" />
+                  <BioInput label="Role" value={bioDraft.role} onChange={(v) => setBioDraft({ ...bioDraft, role: v })} placeholder="Business Development Manager" />
                   <BioInput label="City" value={bioDraft.city} onChange={(v) => setBioDraft({ ...bioDraft, city: v })} placeholder="Bangalore" />
                   <BioInput label="State" value={bioDraft.state} onChange={(v) => setBioDraft({ ...bioDraft, state: v })} placeholder="Karnataka" />
                   <BioInput label="HQ" value={bioDraft.hq} onChange={(v) => setBioDraft({ ...bioDraft, hq: v })} placeholder="Bangalore" />
@@ -1865,7 +2306,7 @@ export default function App() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Payments</h2>
-              <p className="mt-1 text-sm font-medium text-slate-500">Invoices · <span className="font-bold text-slate-600">Red = overdue 30+ days only</span> · below 30 days shows normal colour</p>
+              <p className="mt-1 text-sm font-medium text-slate-500">Purchase orders of Nutrova products · <span className="font-bold text-slate-600">Red = pending 30+ days only</span> · below 30 days shows normal colour</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex items-center rounded-full bg-slate-100 p-1">
@@ -1882,7 +2323,7 @@ export default function App() {
                 <Download className="h-4 w-4" /> Download <span className="rounded-full bg-emerald-700 px-2 py-0.5 text-[11px] text-white">{filteredPayments.length}</span>
               </button>
               <button onClick={() => setPaymentModal({ open: true, draft: emptyPayment(), editing: false })} className="flex items-center gap-1.5 rounded-full bg-amber-400 px-5 py-2 text-sm font-extrabold text-amber-950 shadow-md shadow-amber-200 transition hover:bg-amber-300">
-                <Plus className="h-4 w-4" /> Add Invoice
+                <Plus className="h-4 w-4" /> New Purchase Order
               </button>
             </div>
           </div>
@@ -1929,7 +2370,7 @@ export default function App() {
             <div className="mt-3 flex flex-col gap-2 border-t border-slate-200/70 pt-3 sm:flex-row">
               <div className="flex flex-1 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 shadow-sm focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
                 <Search className="h-4 w-4 shrink-0 text-slate-400" />
-                <input value={paySearch} onChange={(e) => setPaySearch(e.target.value)} placeholder="Search invoice / doctor / area / amount" className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
+                <input value={paySearch} onChange={(e) => setPaySearch(e.target.value)} placeholder="Search PO no / doctor / area / product / amount" className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
                 {paySearch && <button onClick={() => setPaySearch("")} className="rounded-full p-1 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
               </div>
               <select value={paySort} onChange={(e) => setPaySort(e.target.value as typeof paySort)} title="Sort invoices" className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500">
@@ -1945,65 +2386,114 @@ export default function App() {
             </div>
           </div>
 
-          <div className="mt-5 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-            <div className="hidden grid-cols-[1.2fr_0.9fr_1.3fr_0.7fr_0.8fr_0.9fr_0.7fr_auto] gap-3 border-b border-slate-100 bg-slate-50/80 px-6 py-3 text-[11px] font-extrabold uppercase tracking-widest text-slate-500 lg:grid">
-              <span>Doctor</span><span>Invoice</span><span>Purpose</span><span>Amount</span><span>Due date</span><span>Pending days</span><span>Status</span><span className="text-right">Actions</span>
+          {/* purchase orders — column / row table */}
+          <div className="mt-5 overflow-hidden rounded-2xl border border-slate-300 bg-white shadow-sm">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
+                <thead>
+                  <tr className="bg-slate-800 text-[11px] font-extrabold uppercase tracking-wider text-white">
+                    <th className="w-10 border-r border-slate-700 px-3 py-3 text-center">#</th>
+                    <th className="border-r border-slate-700 px-3 py-3">PO / Invoice no</th>
+                    <th className="border-r border-slate-700 px-3 py-3">Order date</th>
+                    <th className="border-r border-slate-700 px-3 py-3">Doctor</th>
+                    <th className="border-r border-slate-700 px-3 py-3">Products ordered</th>
+                    <th className="border-r border-slate-700 px-3 py-3 text-right">Qty</th>
+                    <th className="border-r border-slate-700 px-3 py-3 text-right">Amount</th>
+                    <th className="border-r border-slate-700 px-3 py-3">Due date</th>
+                    <th className="border-r border-slate-700 px-3 py-3">Pending days</th>
+                    <th className="border-r border-slate-700 px-3 py-3">Status</th>
+                    <th className="px-3 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPayments.length === 0 && (
+                    <tr>
+                      <td colSpan={11} className="p-10 text-center">
+                        <Wallet className="mx-auto h-10 w-10 text-slate-300" />
+                        <p className="mt-3 font-extrabold text-slate-700">No purchase orders here</p>
+                        <p className="mt-1 text-xs font-semibold text-slate-400">Tap “New Purchase Order” to add the products a doctor ordered.</p>
+                      </td>
+                    </tr>
+                  )}
+                  {filteredPayments.map((p, idx) => {
+                    const od = daysOverdue(p.dueDate);
+                    const critical = p.status !== "paid" && od > 30;
+                    const pastSmall = p.status !== "paid" && od > 0 && od <= 30;
+                    const st = p.status === "paid" ? "paid" : critical ? "overdue" : "pending";
+                    const pend = pendingDaysInfo(p);
+                    const cell = "border-r border-slate-200 px-3 py-3";
+                    return (
+                      <tr key={p.id} className={`border-t border-slate-200 align-top ${critical ? "bg-rose-50/70" : idx % 2 ? "bg-slate-50/70" : "bg-white"}`}>
+                        <td className={`${cell} text-center text-xs font-extrabold text-slate-400`}>{idx + 1}</td>
+                        <td className={cell}>
+                          <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1 font-mono text-xs font-extrabold ${critical ? "bg-rose-100 text-rose-800" : "bg-slate-100 text-slate-700"}`}>
+                            <FileText className={`h-3.5 w-3.5 ${critical ? "text-rose-500" : "text-slate-400"}`} />{p.invoiceNo || "—"}
+                          </span>
+                          <p className="mt-1 text-[11px] font-semibold text-slate-400">{p.mode}</p>
+                        </td>
+                        <td className={`${cell} whitespace-nowrap text-xs font-bold text-slate-600`}>{p.orderDate ? fmtDate(p.orderDate) : "—"}</td>
+                        <td className={cell}>
+                          <p className="font-extrabold text-slate-900">{p.doctorName}</p>
+                          <p className="flex items-center gap-1 text-[11px] font-semibold text-slate-400"><MapPin className="h-3 w-3" />{p.doctorArea || "—"}</p>
+                        </td>
+                        <td className={`${cell} min-w-[250px]`}>
+                          {p.items.length > 0 ? (
+                            <ul className="space-y-1">
+                              {p.items.map((it, i) => (
+                                <li key={i} className="flex items-start justify-between gap-3 text-xs font-semibold text-slate-700">
+                                  <span className="min-w-0">{shortProduct(it.product)}</span>
+                                  <span className="shrink-0 font-extrabold text-emerald-800">× {it.qty}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="text-xs font-semibold italic text-slate-400">{p.purpose || "No products listed"}</p>
+                          )}
+                          {p.items.length > 0 && p.purpose && <p className="mt-1.5 text-[11px] font-medium text-slate-400">{p.purpose}</p>}
+                        </td>
+                        <td className={`${cell} text-right font-extrabold text-slate-800`}>{p.items.length > 0 ? orderQty(p.items) : "—"}</td>
+                        <td className={`${cell} whitespace-nowrap text-right text-base font-extrabold ${critical ? "text-rose-700" : "text-slate-900"}`}>{inr(p.amount)}</td>
+                        <td className={`${cell} whitespace-nowrap text-xs font-bold ${critical ? "text-rose-700" : "text-slate-600"}`}>
+                          {fmtDate(p.dueDate)}
+                          {p.status === "paid" && p.paidDate && <span className="block text-[11px] font-semibold text-emerald-600">Paid {fmtShort(p.paidDate)}</span>}
+                        </td>
+                        <td className={cell}>
+                          <span title={critical ? `${od} days pending — over 30 days, red` : pastSmall ? `${od} days pending — under 30 days, normal colour` : pend.text} className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-extrabold ${pendingBadgeCls(pend.tone)}`}>
+                            <Clock className="h-3 w-3" />{pend.text}
+                          </span>
+                        </td>
+                        <td className={cell}>
+                          <span className={`rounded-full px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wide ${st === "paid" ? "bg-emerald-100 text-emerald-800" : st === "overdue" ? "bg-rose-600 text-white" : "bg-amber-100 text-amber-800"}`}>
+                            {st}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {p.status !== "paid" && (
+                              <button onClick={() => markPaid(p)} className="flex items-center gap-1 whitespace-nowrap rounded-xl bg-emerald-700 px-3 py-2 text-xs font-extrabold text-white transition hover:bg-emerald-800">
+                                <Check className="h-3.5 w-3.5" /> Paid
+                              </button>
+                            )}
+                            <IconBtn title="Edit purchase order" onClick={() => setPaymentModal({ open: true, draft: { ...p, items: p.items.map((i) => ({ ...i })) }, editing: true })}><Pencil className="h-4 w-4" /></IconBtn>
+                            <IconBtn title="Delete purchase order" danger onClick={() => deleteInvoice(p)}><Trash2 className="h-4 w-4" /></IconBtn>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                {filteredPayments.length > 0 && (
+                  <tfoot>
+                    <tr className="border-t-2 border-slate-300 bg-slate-100 text-sm font-extrabold text-slate-800">
+                      <td colSpan={5} className="border-r border-slate-200 px-3 py-3 text-right text-xs uppercase tracking-wider text-slate-500">Total · {filteredPayments.length} purchase order{filteredPayments.length !== 1 ? "s" : ""}</td>
+                      <td className="border-r border-slate-200 px-3 py-3 text-right">{filteredPayments.reduce((s, p) => s + orderQty(p.items), 0)}</td>
+                      <td className="border-r border-slate-200 px-3 py-3 text-right text-base">{inr(filteredPayments.reduce((s, p) => s + p.amount, 0))}</td>
+                      <td colSpan={4} className="px-3 py-3 text-xs font-bold text-slate-500">{inr(filteredPayments.filter((p) => p.status !== "paid").reduce((s, p) => s + p.amount, 0))} still pending</td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
             </div>
-            {filteredPayments.length === 0 && (
-              <div className="p-10 text-center">
-                <Wallet className="mx-auto h-10 w-10 text-slate-300" />
-                <p className="mt-3 font-extrabold text-slate-700">No invoices here</p>
-              </div>
-            )}
-            {filteredPayments.map((p) => {
-              const od = daysOverdue(p.dueDate);
-              const critical = p.status !== "paid" && od > 30;
-              const pastSmall = p.status !== "paid" && od > 0 && od <= 30;
-              const st = p.status === "paid" ? "paid" : critical ? "overdue" : "pending";
-              const pend = pendingDaysInfo(p);
-              return (
-                <div key={p.id} className={`grid grid-cols-1 gap-2 border-b border-slate-100 px-5 py-4 last:border-0 sm:px-6 lg:grid-cols-[1.2fr_0.9fr_1.3fr_0.7fr_0.8fr_0.9fr_0.7fr_auto] lg:items-center lg:gap-3 ${critical ? "bg-rose-50/50" : ""}`}>
-                  <div className="flex items-center gap-2.5">
-                    <div className={`flex h-9 w-9 items-center justify-center rounded-xl text-xs font-extrabold text-white ${critical ? "bg-rose-600" : "bg-emerald-700"}`}>{initials(p.doctorName || "?")}</div>
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-extrabold text-slate-900">{p.doctorName}</p>
-                      <p className="text-xs font-medium text-slate-400">{p.mode}{p.doctorArea ? ` · ${p.doctorArea}` : ""}</p>
-                    </div>
-                  </div>
-                  <p>
-                    <span className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 font-mono text-xs font-extrabold ${critical ? "bg-rose-100 text-rose-800" : "bg-slate-100 text-slate-700"}`}>
-                      <FileText className={`h-3.5 w-3.5 ${critical ? "text-rose-500" : "text-slate-400"}`} />{p.invoiceNo || "—"}
-                    </span>
-                  </p>
-                  <p className="text-sm font-semibold text-slate-600">{p.purpose}</p>
-                  <p className={`text-base font-extrabold ${critical ? "text-rose-700" : "text-slate-900"}`}>{inr(p.amount)}</p>
-                  <p className={`text-sm font-bold ${critical ? "text-rose-700" : "text-slate-600"}`}>
-                    {fmtDate(p.dueDate)}
-                    {p.status === "paid" && p.paidDate && <span className="block text-xs font-medium text-emerald-600">Paid {fmtShort(p.paidDate)}</span>}
-                  </p>
-                  <div>
-                    <span className="mb-1 block text-[10px] font-extrabold uppercase tracking-widest text-slate-400 lg:hidden">Pending days</span>
-                    <span title={critical ? `${od} days pending — over 30 days, red` : pastSmall ? `${od} days pending — under 30 days, normal colour` : pend.text} className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-[11px] font-extrabold ${pendingBadgeCls(pend.tone)}`}>
-                      <Clock className="h-3 w-3" />{pend.text}
-                    </span>
-                  </div>
-                  <div>
-                    <span title={critical ? `${od} days overdue — over 30 days` : pastSmall ? `${od} days overdue — under 30 days, normal colour` : st} className={`rounded-full px-3 py-1 text-[11px] font-extrabold uppercase tracking-wide ${st === "paid" ? "bg-emerald-100 text-emerald-800" : st === "overdue" ? "bg-rose-600 text-white" : "bg-amber-100 text-amber-800"}`}>
-                      {st}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 lg:justify-end">
-                    {p.status !== "paid" && (
-                      <button onClick={() => markPaid(p)} className="flex items-center gap-1 rounded-xl bg-emerald-700 px-3 py-2 text-xs font-extrabold text-white transition hover:bg-emerald-800">
-                        <Check className="h-3.5 w-3.5" /> Mark paid
-                      </button>
-                    )}
-                    <IconBtn title="Edit invoice" onClick={() => setPaymentModal({ open: true, draft: { ...p }, editing: true })}><Pencil className="h-4 w-4" /></IconBtn>
-                    <IconBtn title="Delete invoice" danger onClick={() => deleteInvoice(p)}><Trash2 className="h-4 w-4" /></IconBtn>
-                  </div>
-                </div>
-              );
-            })}
           </div>
         </section>
         )}
@@ -2014,7 +2504,7 @@ export default function App() {
         <div className="mx-auto grid max-w-7xl grid-cols-1 gap-6 px-5 py-8 sm:px-8 md:grid-cols-3">
           <div>
             <p className="flex items-center gap-2 text-base font-extrabold"><Stethoscope className="h-5 w-5 text-emerald-300" /> Nutrova Doctor Tracker</p>
-            <p className="mt-1.5 text-sm text-emerald-100/70">Field companion for {bio.name || "MR"} · {bio.role} · {bio.city}, {bio.state}</p>
+            <p className="mt-1.5 text-sm text-emerald-100/70">Field companion for {bio.name || "Business Development Manager"} · {bio.role} · {bio.city}, {bio.state}</p>
           </div>
           <div className="text-sm">
             <p className="text-xs font-extrabold uppercase tracking-widest text-emerald-300/70">Territory summary</p>
@@ -2150,7 +2640,7 @@ export default function App() {
             <p className="flex items-center gap-1.5 text-[12px] font-extrabold uppercase tracking-widest text-sky-900">
               <CalendarDays className="h-4 w-4" /> Appointment — how to take appointment
             </p>
-            <p className="mt-1 text-xs font-medium text-slate-500">Select one or more ways MR should book the visit · as discussed earlier</p>
+            <p className="mt-1 text-xs font-medium text-slate-500">Select one or more ways the Business Development Manager should book the visit</p>
             <p className="mb-2 mt-3 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Ways to take appointment — tap to select</p>
             <div className="flex flex-wrap gap-1.5">
               {APPOINTMENT_MODES.map((mode) => {
@@ -2368,7 +2858,7 @@ export default function App() {
 
       {/* ------------------------------ payment modal ------------------------------ */}
       {paymentModal.open && (
-        <Modal title={paymentModal.editing ? "Edit Invoice" : "Add Invoice"} onClose={() => setPaymentModal({ open: false, draft: emptyPayment(), editing: false })}>
+        <Modal title={paymentModal.editing ? "Edit Purchase Order" : "New Purchase Order"} wide onClose={() => setPaymentModal({ open: false, draft: emptyPayment(), editing: false })}>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Doctor — search by name or area *" span>
               <DoctorPicker
@@ -2386,8 +2876,40 @@ export default function App() {
                 </button>
               </div>
             </Field>
-            <Field label="Purpose *" span><input value={paymentModal.draft.purpose} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, purpose: e.target.value } })} placeholder="e.g. CME sponsorship" className={inputCls} /></Field>
-            <Field label="Amount (₹) *"><input type="number" min={0} value={paymentModal.draft.amount || ""} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, amount: Number(e.target.value) } })} placeholder="10000" className={inputCls} /></Field>
+            <Field label="Order date"><input type="date" value={paymentModal.draft.orderDate} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, orderDate: e.target.value } })} className={inputCls} /></Field>
+            <Field label="Order note (optional)"><input value={paymentModal.draft.purpose} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, purpose: e.target.value } })} placeholder="e.g. Monthly clinic stock order" className={inputCls} /></Field>
+
+            {/* products ordered */}
+            <div className="rounded-2xl border border-teal-200 bg-teal-50/40 p-3 sm:col-span-2">
+              <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+                <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest text-teal-900"><Package className="h-3.5 w-3.5" /> Products ordered</p>
+                <span className="rounded-full bg-white px-3 py-1 text-[11px] font-extrabold text-teal-800 ring-1 ring-teal-200">{orderQty(paymentModal.draft.items)} units · {inr(orderTotal(paymentModal.draft.items))}</span>
+              </div>
+              <div className="space-y-2">
+                {paymentModal.draft.items.map((it, i) => (
+                  <div key={i} className="grid grid-cols-12 items-center gap-2 rounded-xl bg-white p-2 ring-1 ring-slate-200">
+                    <select value={it.product} onChange={(e) => pickPayProduct(i, e.target.value)} className={`${inputCls} col-span-12 sm:col-span-6`}>
+                      <option value="">Select Nutrova product…</option>
+                      {PRODUCT_CATS.map((cat) => (
+                        <optgroup key={cat} label={cat}>
+                          {NUTROVA_PRODUCTS.filter((p) => p.category === cat).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+                        </optgroup>
+                      ))}
+                    </select>
+                    <input type="number" min={1} value={it.qty || ""} onChange={(e) => updatePayItem(i, { qty: Number(e.target.value) })} placeholder="Qty" className={`${inputCls} col-span-4 sm:col-span-2`} />
+                    <input type="number" min={0} value={it.rate || ""} onChange={(e) => updatePayItem(i, { rate: Number(e.target.value) })} placeholder="Rate ₹" className={`${inputCls} col-span-5 sm:col-span-2`} />
+                    <p className="col-span-2 text-right text-xs font-extrabold text-slate-700 sm:col-span-1">{inr((Number(it.qty) || 0) * (Number(it.rate) || 0))}</p>
+                    <button type="button" onClick={() => removePayItem(i)} title="Remove product" className="col-span-1 flex h-9 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-4 w-4" /></button>
+                  </div>
+                ))}
+              </div>
+              <button type="button" onClick={addPayItem} className="mt-2.5 flex items-center gap-1.5 rounded-full border border-teal-300 bg-white px-4 py-1.5 text-xs font-extrabold text-teal-800 transition hover:bg-teal-50">
+                <Plus className="h-3.5 w-3.5" /> Add product
+              </button>
+              <p className="mt-2 text-[11px] font-medium text-slate-500">Rates start from nutrova.com listings — change the rate on any line. Total updates automatically.</p>
+            </div>
+
+            <Field label="Order total (₹) *"><input type="number" min={0} value={paymentModal.draft.amount || ""} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, amount: Number(e.target.value) } })} placeholder="10000" className={inputCls} /></Field>
             <Field label="Mode"><select value={paymentModal.draft.mode} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, mode: e.target.value } })} className={inputCls}>{["UPI", "Bank Transfer", "Cheque", "Cash"].map((m) => <option key={m}>{m}</option>)}</select></Field>
             <Field label="Due date"><input type="date" value={paymentModal.draft.dueDate} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, dueDate: e.target.value } })} className={inputCls} /></Field>
             <Field label="Status"><select value={paymentModal.draft.status} onChange={(e) => setPaymentModal({ ...paymentModal, draft: { ...paymentModal.draft, status: e.target.value as PaymentStatus } })} className={inputCls}><option value="pending">Pending</option><option value="paid">Paid</option></select></Field>
@@ -2414,12 +2936,12 @@ export default function App() {
           <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
             {paymentModal.editing && (
               <button onClick={() => deleteInvoice(paymentModal.draft)} className="flex items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-5 py-2.5 text-sm font-extrabold text-rose-600 transition hover:bg-rose-100">
-                <Trash2 className="h-4 w-4" /> Delete invoice
+                <Trash2 className="h-4 w-4" /> Delete purchase order
               </button>
             )}
             <div className="flex flex-1 flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button onClick={() => setPaymentModal({ open: false, draft: emptyPayment(), editing: false })} className="rounded-xl border border-slate-200 px-5 py-2.5 text-sm font-bold text-slate-600 transition hover:bg-slate-50">Cancel</button>
-              <button onClick={savePayment} className="rounded-xl bg-emerald-700 px-6 py-2.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800">{paymentModal.editing ? "Update Invoice" : "Add Invoice"}</button>
+              <button onClick={savePayment} className="rounded-xl bg-emerald-700 px-6 py-2.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800">{paymentModal.editing ? "Update Order" : "Save Purchase Order"}</button>
             </div>
           </div>
         </Modal>
@@ -2433,6 +2955,26 @@ export default function App() {
           confirmText={confirmDelete.confirmText || "Yes, remove"}
           onCancel={closeConfirm}
           onYes={confirmDelete.onYes}
+        />
+      )}
+
+      {shareOpen && (
+        <ShareAppDialog
+          url={appShareUrl}
+          text={appShareText}
+          copied={shareCopied}
+          online={online}
+          onClose={() => setShareOpen(false)}
+          onNative={handleNativeShare}
+          onCopy={handleCopyLink}
+        />
+      )}
+      {setupOpen && (
+        <SetupDialog
+          cfg={cfg}
+          onClose={() => setSetupOpen(false)}
+          onSave={(c) => { saveConfig(c); setCfg(c); setSession(null); setSetupOpen(false); showToast("Online store connected"); }}
+          onDisconnect={() => { clearConfig(); setCfg(null); setSession(null); setRemote(null); setSetupOpen(false); showToast("Disconnected — using this phone only", "info"); }}
         />
       )}
 
@@ -2631,6 +3173,141 @@ function Modal({ title, children, onClose, wide }: { title: string; children: Re
           <button onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200"><X className="h-4 w-4" /></button>
         </div>
         {children}
+      </div>
+    </div>
+  );
+}
+
+/* Online store setup — owner pastes the Supabase project URL + anon key once */
+function SetupDialog({ cfg, onSave, onDisconnect, onClose }: {
+  cfg: BackendConfig | null; onSave: (c: BackendConfig) => void; onDisconnect: () => void; onClose: () => void;
+}) {
+  const [url, setUrl] = useState(cfg?.url || "");
+  const [key, setKey] = useState(cfg?.key || "");
+  const [err, setErr] = useState("");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+  const copySql = async () => {
+    try { await navigator.clipboard.writeText(SETUP_SQL); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* ignore */ }
+  };
+  const save = () => {
+    const u = url.trim().replace(/\/+$/, "");
+    const k = key.trim();
+    if (!/^https:\/\/.+\..+/.test(u)) return setErr("Project URL must start with https:// (e.g. https://abcd1234.supabase.co)");
+    if (k.length < 20) return setErr("Paste the full anon / public key");
+    onSave({ url: u, key: k });
+  };
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={onClose}>
+      <div className="anim-pop max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-white shadow-2xl sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3 bg-emerald-950 px-6 py-5 text-white">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20"><Cloud className="h-5 w-5 text-emerald-300" /></div>
+            <div>
+              <p className="text-base font-extrabold leading-tight">Online store setup</p>
+              <p className="text-xs text-emerald-200/70">Backend + frontend · accounts & data in the cloud</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-full bg-white/10 hover:bg-white/20"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="space-y-4 p-6">
+          <p className="rounded-xl bg-emerald-50 px-4 py-3 text-xs font-semibold leading-relaxed text-emerald-900 ring-1 ring-emerald-100">
+            Passwords are stored (hashed) on the server and every account's doctors, reminders and purchase orders are saved online — sign in on any phone and the same data appears. Free Supabase plan is enough.
+          </p>
+          <ol className="space-y-2 text-xs font-semibold leading-relaxed text-slate-600">
+            <li><span className="font-extrabold text-slate-900">1.</span> Create a free project at <span className="font-extrabold">supabase.com</span></li>
+            <li><span className="font-extrabold text-slate-900">2.</span> Authentication → Providers → Email → turn <span className="font-extrabold">“Confirm email” OFF</span> (so new accounts sign in instantly)</li>
+            <li className="flex flex-wrap items-center gap-2">
+              <span><span className="font-extrabold text-slate-900">3.</span> SQL Editor → paste & run:</span>
+              <button onClick={copySql} className="flex items-center gap-1 rounded-full bg-slate-900 px-3 py-1 text-[11px] font-extrabold text-white hover:bg-slate-700">
+                {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />} {copied ? "Copied" : "Copy SQL"}
+              </button>
+            </li>
+          </ol>
+          <pre className="max-h-40 overflow-auto rounded-xl bg-slate-900 p-3 text-[10.5px] leading-relaxed text-emerald-200">{SETUP_SQL}</pre>
+          <p className="text-xs font-semibold text-slate-600"><span className="font-extrabold text-slate-900">4.</span> Project Settings → API → copy <span className="font-extrabold">Project URL</span> and <span className="font-extrabold">anon public key</span>:</p>
+          <div>
+            <label className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Project URL</label>
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://xxxxxxxx.supabase.co" className={inputCls} />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Anon public key</label>
+            <textarea value={key} onChange={(e) => setKey(e.target.value)} rows={3} placeholder="eyJhbGciOi…" className={`${inputCls} font-mono text-xs`} />
+          </div>
+          {err && <p className="rounded-xl bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{err}</p>}
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            {cfg && <button onClick={onDisconnect} className="rounded-xl border border-rose-200 bg-rose-50 px-5 py-2.5 text-sm font-extrabold text-rose-600 hover:bg-rose-100">Disconnect</button>}
+            <button onClick={save} className="rounded-xl bg-emerald-700 px-6 py-2.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 hover:bg-emerald-800">{cfg ? "Update connection" : "Save & connect"}</button>
+          </div>
+          <p className="text-[11px] font-medium leading-relaxed text-slate-400">The anon key is public by design — your data stays private because every row is locked to its owner (Row Level Security). The share link includes this connection so teammates connect automatically.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Share app — link + QR + install steps */
+function ShareAppDialog({ url, text, copied, online, onClose, onNative, onCopy }: {
+  url: string; text: string; copied: boolean; online: boolean; onClose: () => void; onNative: () => void; onCopy: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const waLink = `https://wa.me/?text=${encodeURIComponent(text + "\n" + url)}`;
+  const mailLink = `mailto:?subject=${encodeURIComponent("Nutrova Doctor Tracker")}&body=${encodeURIComponent(text + "\n" + url)}`;
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onClick={onClose}>
+      <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="bg-emerald-950 px-6 py-5 text-white">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20">
+                <Share2 className="h-5 w-5 text-emerald-300" />
+              </div>
+              <div>
+                <p className="text-base font-extrabold leading-tight">Share this app</p>
+                <p className="text-xs text-emerald-200/70">{online ? "Link includes the online store — teammates just create an account" : "Send to other Business Development Managers like an APK"}</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"><X className="h-4 w-4" /></button>
+          </div>
+        </div>
+        <div className="space-y-4 p-6">
+          <div className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="rounded-xl bg-white p-2 ring-1 ring-slate-200">
+              <QRCodeSVG value={url} size={84} level="M" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-extrabold text-slate-900">Scan to open app</p>
+              <p className="mt-0.5 break-all text-[11px] font-medium leading-relaxed text-slate-500">{url}</p>
+            </div>
+          </div>
+          <button onClick={onNative} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-700 py-3 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800">
+            <Share2 className="h-4 w-4" /> Share via phone (WhatsApp / SMS / more)
+          </button>
+          <div className="grid grid-cols-2 gap-2">
+            <a href={waLink} target="_blank" rel="noreferrer" className="flex items-center justify-center gap-1.5 rounded-xl bg-[#25D366] py-2.5 text-xs font-extrabold text-white transition hover:brightness-95">
+              WhatsApp
+            </a>
+            <a href={mailLink} className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white py-2.5 text-xs font-extrabold text-slate-700 transition hover:bg-slate-50">
+              <Mail className="h-3.5 w-3.5" /> Email
+            </a>
+          </div>
+          <button onClick={onCopy} className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 bg-white py-2.5 text-xs font-extrabold text-slate-600 transition hover:bg-slate-50">
+            {copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />} {copied ? "Link copied!" : "Copy app link"}
+          </button>
+          <div className="rounded-2xl bg-amber-50 p-4 text-[11px] font-semibold leading-relaxed text-amber-900 ring-1 ring-amber-200">
+            <p className="font-extrabold">Install like APK on Android:</p>
+            <p className="mt-1">1. Open link in Chrome → ⋮ menu → <span className="font-extrabold">Add to Home screen / Install app</span></p>
+            <p>2. App icon appears like APK · works fast · data stays on phone</p>
+          </div>
+        </div>
       </div>
     </div>
   );
