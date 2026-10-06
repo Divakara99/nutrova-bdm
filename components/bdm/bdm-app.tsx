@@ -21,6 +21,7 @@ import {
   Plus,
   RefreshCcw,
   Search,
+  Share2,
   Stethoscope,
   Target,
   Trash2,
@@ -634,8 +635,8 @@ const emptyPayment = (): Payment => ({ id: uid(), invoiceNo: genInvoiceNo(), doc
 
 export default function App() {
   const [signedIn, setSignedIn] = useState(false);
-  const [loginEmail, setLoginEmail] = useState("divakar.reddy@nutrova.com");
-  const [loginPassword, setLoginPassword] = useState("nutrova123");
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [signupName, setSignupName] = useState("");
@@ -712,6 +713,29 @@ export default function App() {
   const showToast = (msg: string, kind: "ok" | "info" = "ok") => {
     setToast({ msg, kind });
     window.setTimeout(() => setToast(null), 2600);
+  };
+
+  const shareApp = async () => {
+    const url = window.location.origin;
+    const shareData = {
+      title: "Nutrova Doctor Tracker",
+      text: "Track doctor visits, reminders and payments with Nutrova Doctor Tracker.",
+      url,
+    };
+    if (navigator.share) {
+      try {
+        await navigator.share(shareData);
+      } catch (err) {
+        if ((err as DOMException)?.name !== "AbortError") showToast("Could not share the app", "info");
+      }
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast("App link copied to clipboard");
+    } catch {
+      showToast(`Share this link: ${url}`, "info");
+    }
   };
 
   /* tab navigation — each tab is its own separate page (Bio shifted out of Dashboard) */
@@ -1228,6 +1252,14 @@ export default function App() {
                 <Mail className="h-4 w-4 shrink-0 text-emerald-300" />
                 <span className="max-w-[220px] truncate">{bio.email || "—"}</span>
               </span>
+              <button
+                type="button"
+                onClick={shareApp}
+                aria-label="Share app"
+                className={`flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-400 font-bold text-emerald-950 transition hover:bg-emerald-300 sm:gap-2 sm:text-sm ${frozenScrolled ? "px-3 py-1.5 text-xs sm:px-4" : "px-3.5 py-2 text-xs sm:px-5 sm:py-2.5 sm:text-sm"}`}
+              >
+                <Share2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> Share
+              </button>
               <button onClick={() => setSignedIn(false)} className={`flex shrink-0 items-center gap-1.5 rounded-full bg-white/10 font-bold text-white ring-1 ring-white/15 transition hover:bg-white/20 sm:gap-2 sm:text-sm ${frozenScrolled ? "px-3 py-1.5 text-xs sm:px-4" : "px-3.5 py-2 text-xs sm:px-5 sm:py-2.5 sm:text-sm"}`}>
                 <LogOut className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> Sign out
               </button>
