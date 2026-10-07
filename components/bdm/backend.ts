@@ -27,7 +27,18 @@ const RECOVERY_INTENT_KEY = "nutrova-password-reset-pending-v1";
 const DEFAULT_URL = "https://defrdyzvtoestbjiqkaj.supabase.co";
 const DEFAULT_KEY = "sb_publishable__3FND446FELWD9zzaNjKbw_arjawQLP";
 
-export const SETUP_SQL = `create table if not exists public.nutrova_store (
+export const SETUP_SQL = `-- ============================================================
+-- Nutrova Doctor Tracker — Supabase setup (safe to re-run)
+-- Owner: M Divakar Reddy <divakar.reddy@nutrova.com>
+--   Role: Business Development Manager · HQ: Bangalore 2
+-- Run in Supabase Dashboard → SQL Editor → New query → Run.
+-- Every account only reads/writes its own rows (RLS).
+-- New accounts automatically start with a fresh, empty workspace.
+-- Re-running also enables the owner's Users tab (read-only view of all accounts).
+-- ============================================================
+
+-- 1) App data table: one row per account per data key
+create table if not exists public.nutrova_store (
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
   key text not null,
   value jsonb not null,
@@ -35,13 +46,37 @@ export const SETUP_SQL = `create table if not exists public.nutrova_store (
   primary key (user_id, key)
 );
 
+-- 2) Lock every row to its owner (this is what keeps accounts separate)
 alter table public.nutrova_store enable row level security;
 
 drop policy if exists "own rows" on public.nutrova_store;
 create policy "own rows" on public.nutrova_store
   for all
   using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);`;
+  with check (auth.uid() = user_id);
+
+-- 2b) Project owner (M Divakar Reddy) can READ every account's rows so the
+-- owner's Users tab can list accounts and view their doctors/invoices.
+-- Nobody else is affected: teammates still only see their own rows, and the
+-- owner still cannot write or delete anyone else's data through this policy.
+drop policy if exists "owner reads all" on public.nutrova_store;
+create policy "owner reads all" on public.nutrova_store
+  for select
+  to authenticated
+  using ((auth.jwt() ->> 'email') = 'divakar.reddy@nutrova.com');
+
+-- 3) Owner account details (safe: touches ONLY divakar.reddy@nutrova.com)
+update auth.users
+set raw_user_meta_data = coalesce(raw_user_meta_data, '{}'::jsonb)
+  || '{"name": "M Divakar Reddy", "hq": "Bangalore 2"}'::jsonb
+where lower(email) = 'divakar.reddy@nutrova.com';
+
+-- 4) Verify: RLS must be ON, and confirm who exists (read-only checks)
+select relname as table_name, relrowsecurity as rls_enabled
+from pg_class where relname = 'nutrova_store';
+select email, created_at from auth.users order by created_at;
+select count(*) as total_rows, count(distinct user_id) as accounts
+from public.nutrova_store;`;
 
 const clean = (u: string) => u.trim().replace(/\/+$/, "");
 
@@ -82,8 +117,10 @@ function clientFor(url: string, key: string): SupabaseClient {
   let c = clients.get(id);
   if (!c) {
     c = createClient(url, key, {
-      // Let Supabase process reset callbacks on arrival and emit PASSWORD_RECOVERY.
-      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+      // The app explicitly parses and exchanges recovery callbacks before rendering
+      // the signed-in workspace. This prevents an email reset link from silently
+      // taking a user straight into an existing signed-in session.
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
     });
     clients.set(id, c);
   }
@@ -334,31 +371,39 @@ export type UrlRecoverySignal =
 
 export function getUrlRecoverySignal(): UrlRecoverySignal | null {
   try {
+    const pendingIntent = !!localStorage.getItem(RECOVERY_INTENT_KEY);
     const h = window.location.hash || "";
     if (h) {
       const hp = new URLSearchParams(h.replace(/^#/, ""));
       const herr = hp.get("error_description") || hp.get("error") || "";
       if (herr) return { kind: "error", message: herr };
+      const hType = hp.get("type") || hp.get("auth") || "";
       const at = hp.get("access_token") || "";
       const rt = hp.get("refresh_token") || "";
-      if (at && rt) return { kind: "hash-tokens", access_token: at, refresh_token: rt };
+      if (at && rt && (hType === "recovery" || hType === "reset" || pendingIntent)) return { kind: "hash-tokens", access_token: at, refresh_token: rt };
       const hc = hp.get("code") || "";
-      if (hc) return { kind: "code", code: hc };
-      if (hp.get("type") === "recovery" || hp.get("auth") === "recovery" || hp.get("auth") === "reset") return { kind: "marker" };
+      if (hc && (hType === "recovery" || hType === "reset" || pendingIntent)) return { kind: "code", code: hc };
+      if (hType === "recovery" || hType === "reset" || pendingIntent) return { kind: "marker" };
     }
     const q = window.location.search || "";
     if (q) {
       const qp = new URLSearchParams(q);
-      const qerr = qp.get("error_description") || qp.get("error") || "";
+      const qerr = qp.get("error_description") || qp.get("error_message") || qp.get("error") || "";
       if (qerr) return { kind: "error", message: qerr };
+      const qType = qp.get("type") || qp.get("auth") || "";
+      // Supabase implicit-flow/custom templates may put the recovery tokens in
+      // the query string instead of the fragment.
+      const qat = qp.get("access_token") || "";
+      const qrt = qp.get("refresh_token") || "";
+      if (qat && qrt && (qType === "recovery" || qType === "reset" || pendingIntent)) return { kind: "hash-tokens", access_token: qat, refresh_token: qrt };
       const code = qp.get("code") || "";
-      if (code) return { kind: "code", code };
+      if (code && (qType === "recovery" || qType === "reset" || pendingIntent)) return { kind: "code", code };
       const th = qp.get("token_hash") || "";
-      if (th) return { kind: "token-hash", token_hash: th };
-      if (qp.get("type") === "recovery" || qp.get("auth") === "recovery" || qp.get("auth") === "reset") return { kind: "marker" };
+      if (th && (qType === "recovery" || qType === "reset" || pendingIntent)) return { kind: "token-hash", token_hash: th };
+      if (qType === "recovery" || qType === "reset" || pendingIntent) return { kind: "marker" };
     }
     // Same-device recovery marker: handles Supabase redirects that strip auth params.
-    if (localStorage.getItem(RECOVERY_INTENT_KEY)) return { kind: "marker" };
+    if (pendingIntent) return { kind: "marker" };
   } catch {
     /* ignore */
   }
@@ -449,7 +494,11 @@ export function listenForPasswordRecovery(
 ): () => void {
   const c = clientFor(cfg.url, cfg.key);
   const { data } = c.auth.onAuthStateChange((event, session) => {
-    if (event === "PASSWORD_RECOVERY" && session) {
+    let hasPendingIntent = false;
+    try { hasPendingIntent = !!localStorage.getItem(RECOVERY_INTENT_KEY); } catch { /* ignore */ }
+    // Supabase normally emits PASSWORD_RECOVERY. Some email callback flows emit
+    // SIGNED_IN instead; the pending reset marker safely disambiguates that path.
+    if ((event === "PASSWORD_RECOVERY" || (event === "SIGNED_IN" && hasPendingIntent)) && session) {
       onRecovery(toSession(session, session.user ?? undefined));
     }
   });
@@ -543,6 +592,84 @@ export async function saveKey(cfg: BackendConfig, rowKey: string, value: unknown
         throw new Error(friendly(last));
       }
       return;
+    } catch (e) {
+      if (e instanceof Error && isKeyError(e.message)) {
+        last = e.message;
+        continue;
+      }
+      throw e instanceof Error ? new Error(friendly(e.message)) : e;
+    }
+  }
+  throw new Error(finalError(last));
+}
+
+/* ------------------------- owner: all-users view ------------------------- */
+export interface TeamRosterRow {
+  userId: string;
+  bio: Record<string, unknown>;
+  updatedAt: string;
+}
+
+/* Owner-only: list every account's profile row. Works only after the
+   "owner reads all" policy from SETUP_SQL has been run in Supabase. */
+export async function fetchOwnerRoster(cfg: BackendConfig): Promise<TeamRosterRow[]> {
+  let last = "";
+  for (const key of keyCandidates(cfg.key)) {
+    const r = await ready(clientFor(cfg.url, key));
+    if (!r.ok) {
+      last = r.error;
+      if (isKeyError(last)) continue;
+      throw new Error(friendly(last));
+    }
+    try {
+      const res = await r.client
+        .from("nutrova_store")
+        .select("user_id,value,updated_at")
+        .eq("key", "nutrova-bio-v1")
+        .order("updated_at", { ascending: false });
+      if (res.error) {
+        last = res.error.message;
+        if (isKeyError(last)) continue;
+        throw new Error(friendly(last));
+      }
+      return (res.data || []).map((row) => ({
+        userId: String((row as { user_id: string }).user_id),
+        bio: (((row as { value: unknown }).value || {}) as Record<string, unknown>),
+        updatedAt: String((row as { updated_at: string }).updated_at || ""),
+      }));
+    } catch (e) {
+      if (e instanceof Error && isKeyError(e.message)) {
+        last = e.message;
+        continue;
+      }
+      throw e instanceof Error ? new Error(friendly(e.message)) : e;
+    }
+  }
+  throw new Error(finalError(last));
+}
+
+/* Owner-only: load one team member's full workspace (bio, doctors, patches, reminders, payments). */
+export async function fetchUserWorkspace(cfg: BackendConfig, userId: string): Promise<Record<string, unknown>> {
+  let last = "";
+  for (const key of keyCandidates(cfg.key)) {
+    const r = await ready(clientFor(cfg.url, key));
+    if (!r.ok) {
+      last = r.error;
+      if (isKeyError(last)) continue;
+      throw new Error(friendly(last));
+    }
+    try {
+      const res = await r.client.from("nutrova_store").select("key,value").eq("user_id", userId);
+      if (res.error) {
+        last = res.error.message;
+        if (isKeyError(last)) continue;
+        throw new Error(friendly(last));
+      }
+      const out: Record<string, unknown> = {};
+      (res.data || []).forEach((row) => {
+        out[String((row as { key: string }).key)] = (row as { value: unknown }).value;
+      });
+      return out;
     } catch (e) {
       if (e instanceof Error && isKeyError(e.message)) {
         last = e.message;

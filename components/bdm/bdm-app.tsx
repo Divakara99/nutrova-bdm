@@ -10,6 +10,7 @@ import {
   CalendarDays,
   Check,
   ChevronDown,
+  ChevronRight,
   Clock,
   Cloud,
   CloudOff,
@@ -40,7 +41,9 @@ import {
   Trash2,
   User,
   UserPlus,
+  Users,
   Volume2,
+  VolumeX,
   Wallet,
   X,
 } from "lucide-react";
@@ -50,7 +53,10 @@ import {
   adoptRecoverySession,
   clearSession,
   clearUrlAuthParams,
+  exchangeRecoveryCode,
   fetchAll,
+  fetchOwnerRoster,
+  fetchUserWorkspace,
   getRecoverySession,
   getUrlRecoverySignal,
   loadSession,
@@ -637,14 +643,17 @@ function describeTime(d: Doctor): string {
 
 /* --------------------------------- seed data -------------------------------- */
 
+/* Neutral fallback profile — deliberately contains NO owner details, so a new
+   account can never inherit them. The owner identity lives only in APP_OWNER
+   (heading, footer, login, About) and in each account's own saved Bio. */
 const seedBio = (): Bio => ({
-  name: "Divakar Reddy",
+  name: "",
   role: "Business Development Manager",
-  city: "Bangalore",
-  state: "Karnataka",
-  hq: "Bangalore",
+  city: "",
+  state: "",
+  hq: "",
   phone: "",
-  email: "divakar.reddy@nutrova.com",
+  email: "",
 });
 
 /* App creator — highlighted on the login screen */
@@ -847,7 +856,25 @@ const KIND_COLORS: Record<ReminderKind, string> = {
 
 /* ---------------------------------- app ---------------------------------- */
 
-type Tab = "dashboard" | "doctors" | "reminders" | "payments" | "bio" | "settings";
+type Tab = "dashboard" | "doctors" | "reminders" | "payments" | "bio" | "settings" | "users";
+
+interface TeamMember {
+  userId: string;
+  name: string;
+  email: string;
+  role: string;
+  hq: string;
+  city: string;
+  phone: string;
+  updatedAt: string;
+}
+interface TeamWorkspace {
+  bio: Bio;
+  doctors: Doctor[];
+  patches: Patch[];
+  reminders: Reminder[];
+  payments: Payment[];
+}
 
 const emptyDoctor = (): Doctor => ({
   id: uid(), name: "", specialty: "Cosmetic Dermatologist", qualification: "", clinic: "", area: "",
@@ -898,32 +925,124 @@ function useIsAndroidPhone(): boolean {
   return isPhone;
 }
 
-/* ---------- Reminder alarm: sound + phone notification (no audio files needed) ---------- */
+/* ---------- Reminder alarm: selectable sounds + phone notification (no audio files needed) ---------- */
+type AlarmSoundId = "sunrise" | "classic" | "siren" | "bell";
+const ALARM_SOUNDS: { id: AlarmSoundId; label: string; hint: string }[] = [
+  { id: "sunrise", label: "Sunrise Chime", hint: "Gentle rising chime — best for mornings" },
+  { id: "classic", label: "Classic Beep", hint: "The original two-tone beep" },
+  { id: "siren", label: "Siren Call", hint: "Loud wailing siren — hard to miss" },
+  { id: "bell", label: "Temple Bell", hint: "Deep resonant bell" },
+];
+const ALARM_SOUND_KEY = "nutrova-alarm-sound-v1";
+function getAlarmSound(): AlarmSoundId {
+  try {
+    const v = localStorage.getItem(ALARM_SOUND_KEY);
+    if (v === "classic" || v === "siren" || v === "bell" || v === "sunrise") return v;
+  } catch {
+    /* ignore */
+  }
+  return "sunrise";
+}
+function setAlarmSoundStorage(id: AlarmSoundId) {
+  try {
+    localStorage.setItem(ALARM_SOUND_KEY, id);
+  } catch {
+    /* ignore */
+  }
+}
 let alarmAudioCtx: AudioContext | null = null;
-function playAlarmSound(repeats = 3) {
+function alarmCtx(): AudioContext | null {
   try {
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AC) return;
+    if (!AC) return null;
     if (!alarmAudioCtx) alarmAudioCtx = new AC();
     if (alarmAudioCtx.state === "suspended") void alarmAudioCtx.resume();
-    const ctx = alarmAudioCtx;
+    return alarmAudioCtx;
+  } catch {
+    return null;
+  }
+}
+function alarmTone(
+  ctx: AudioContext,
+  dest: AudioNode,
+  opts: { freq: number; freqEnd?: number; type: OscillatorType; at: number; dur: number; vol: number }
+) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = opts.type;
+  osc.frequency.setValueAtTime(opts.freq, opts.at);
+  if (opts.freqEnd) osc.frequency.linearRampToValueAtTime(opts.freqEnd, opts.at + opts.dur);
+  gain.gain.setValueAtTime(0.001, opts.at);
+  gain.gain.exponentialRampToValueAtTime(opts.vol, opts.at + 0.03);
+  gain.gain.exponentialRampToValueAtTime(0.001, opts.at + opts.dur);
+  osc.connect(gain);
+  gain.connect(dest);
+  osc.start(opts.at);
+  osc.stop(opts.at + opts.dur + 0.05);
+}
+const ALARM_MUTED_KEY = "nutrova-alarm-muted-v1";
+function isAlarmMuted(): boolean {
+  try {
+    return localStorage.getItem(ALARM_MUTED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function setAlarmMutedStorage(muted: boolean) {
+  try {
+    localStorage.setItem(ALARM_MUTED_KEY, muted ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+/* Immediately silence any scheduled alarm audio */
+function stopAlarmSound() {
+  try {
+    if (alarmAudioCtx) {
+      const ctx = alarmAudioCtx;
+      alarmAudioCtx = null;
+      void ctx.close().catch(() => {});
+    }
+  } catch {
+    alarmAudioCtx = null;
+  }
+}
+function playAlarmSound(repeats = 3, soundId: AlarmSoundId = getAlarmSound(), ignoreMute = false) {
+  try {
+    if (!ignoreMute && isAlarmMuted()) return;
+    const ctx = alarmCtx();
+    if (!ctx) return;
     const start = ctx.currentTime + 0.05;
-    for (let i = 0; i < repeats; i++) {
-      const t0 = start + i * 0.55;
-      [880, 660].forEach((freq, j) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        const t = t0 + j * 0.22;
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(freq, t);
-        gain.gain.setValueAtTime(0.001, t);
-        gain.gain.exponentialRampToValueAtTime(0.6, t + 0.04);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(t);
-        osc.stop(t + 0.22);
-      });
+    if (soundId === "sunrise") {
+      // Rising major arpeggio, warm triangle tone
+      const notes = [523.25, 659.25, 783.99, 1046.5];
+      for (let i = 0; i < repeats; i++) {
+        const t0 = start + i * (notes.length * 0.3 + 0.5);
+        notes.forEach((freq, j) => alarmTone(ctx, ctx.destination, { freq, type: "triangle", at: t0 + j * 0.3, dur: 0.34, vol: 0.5 }));
+      }
+    } else if (soundId === "siren") {
+      // Wailing siren: two up-down sweeps per repeat
+      for (let i = 0; i < repeats; i++) {
+        const t0 = start + i * 1.1;
+        alarmTone(ctx, ctx.destination, { freq: 650, freqEnd: 950, type: "sawtooth", at: t0, dur: 0.5, vol: 0.22 });
+        alarmTone(ctx, ctx.destination, { freq: 950, freqEnd: 650, type: "sawtooth", at: t0 + 0.5, dur: 0.5, vol: 0.22 });
+      }
+    } else if (soundId === "bell") {
+      // Resonant bell: fundamental + harmonics with long decay
+      for (let i = 0; i < repeats; i++) {
+        const t0 = start + i * 1.5;
+        alarmTone(ctx, ctx.destination, { freq: 660, type: "sine", at: t0, dur: 1.4, vol: 0.55 });
+        alarmTone(ctx, ctx.destination, { freq: 990, type: "sine", at: t0, dur: 1.1, vol: 0.25 });
+        alarmTone(ctx, ctx.destination, { freq: 1320, type: "sine", at: t0, dur: 0.8, vol: 0.12 });
+      }
+    } else {
+      // Classic two-tone beep
+      for (let i = 0; i < repeats; i++) {
+        const t0 = start + i * 0.55;
+        [880, 660].forEach((freq, j) => {
+          alarmTone(ctx, ctx.destination, { freq, type: "sine", at: t0 + j * 0.22, dur: 0.2, vol: 0.6 });
+        });
+      }
     }
   } catch {
     /* audio not available on this device */
@@ -944,6 +1063,120 @@ function showBrowserNotification(title: string, body: string, tag: string) {
     }
   } catch {
     /* ignore */
+  }
+}
+
+/* ---------- Morning briefing alarm (rings before 8 AM) ---------- */
+const MORNING_ALARM_KEY = "nutrova-morning-alarm-v1";
+const MORNING_FIRED_KEY = "nutrova-morning-fired-v1";
+const DEFAULT_MORNING_TIME = "07:45";
+function loadMorningSettings(): { enabled: boolean; time: string } {
+  try {
+    const raw = localStorage.getItem(MORNING_ALARM_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as { enabled?: boolean; time?: string };
+      return {
+        enabled: p.enabled !== false,
+        time: typeof p.time === "string" && /^\d{2}:\d{2}$/.test(p.time) ? p.time : DEFAULT_MORNING_TIME,
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { enabled: true, time: DEFAULT_MORNING_TIME };
+}
+function saveMorningSettings(s: { enabled: boolean; time: string }) {
+  try {
+    localStorage.setItem(MORNING_ALARM_KEY, JSON.stringify(s));
+  } catch {
+    /* ignore */
+  }
+}
+function morningFiredFor(ownerKey: string): string {
+  try {
+    const raw = localStorage.getItem(MORNING_FIRED_KEY);
+    if (raw) return (JSON.parse(raw) as Record<string, string>)[ownerKey] || "";
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+function markMorningFired(ownerKey: string, day: string) {
+  try {
+    const raw = localStorage.getItem(MORNING_FIRED_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    map[ownerKey] = day;
+    localStorage.setItem(MORNING_FIRED_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+function morningTimeTodayMs(timeHHMM: string): number {
+  const m = /^(\d{2}):(\d{2})$/.exec(timeHHMM || "");
+  const d = new Date();
+  d.setHours(m ? Number(m[1]) : 7, m ? Number(m[2]) : 45, 0, 0);
+  return d.getTime();
+}
+
+export interface MorningBriefing {
+  date: string;
+  title: string;
+  body: string;
+  calls: number;
+  reminders: number;
+  pendingCount: number;
+  pendingTotal: number;
+}
+function buildMorningBriefing(args: {
+  date: string;
+  calls: number;
+  reminders: number;
+  pendingCount: number;
+  pendingTotal: number;
+}): MorningBriefing {
+  const { date, calls, reminders, pendingCount, pendingTotal } = args;
+  const parts = [
+    `${calls} call${calls === 1 ? "" : "s"} today`,
+    `${reminders} reminder${reminders === 1 ? "" : "s"} due`,
+    pendingCount > 0 ? `${pendingCount} payment${pendingCount === 1 ? "" : "s"} pending (${inr(pendingTotal)})` : "no pending payments",
+  ];
+  return {
+    date,
+    title: "Nutrova morning briefing",
+    body: parts.join(" · "),
+    calls,
+    reminders,
+    pendingCount,
+    pendingTotal,
+  };
+}
+
+/* Cache the briefing where the service worker can read it for background alarms */
+async function writeBriefingCache(b: MorningBriefing) {
+  try {
+    if (!("caches" in window)) return;
+    const cache = await caches.open("nutrova-sw-v1");
+    await cache.put("/__nutrova_briefing", new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } }));
+  } catch {
+    /* ignore */
+  }
+}
+
+async function ensureServiceWorker(): Promise<boolean> {
+  try {
+    if (!("serviceWorker" in navigator)) return false;
+    const reg = await navigator.serviceWorker.register("sw.js");
+    try {
+      const ps = (reg as unknown as {
+        periodicSync?: { register: (tag: string, opts?: { minInterval?: number }) => Promise<void> };
+      }).periodicSync;
+      if (ps) await ps.register("morning-briefing", { minInterval: 60 * 60 * 1000 });
+    } catch {
+      /* periodic sync needs an installed PWA + permission; in-app alarm still works */
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1011,6 +1244,16 @@ export default function App() {
   const dataOwnerKey = currentEmail
     ? `${online ? "cloud" : "local"}:${currentEmail.trim().toLowerCase()}`
     : "";
+  const isOwner = currentEmail.trim().toLowerCase() === APP_OWNER.email.toLowerCase();
+  /* Owner-only team view state */
+  const [teamRoster, setTeamRoster] = useState<TeamMember[]>([]);
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [teamError, setTeamError] = useState("");
+  const [teamSearch, setTeamSearch] = useState("");
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [selectedWorkspace, setSelectedWorkspace] = useState<TeamWorkspace | null>(null);
+  const [selectedLoading, setSelectedLoading] = useState(false);
+  const [selectedError, setSelectedError] = useState("");
   const pendingAccountProfileRef = useRef<Bio | null>(null);
   const accountDisplayName = online
     ? session?.name || currentEmail.split("@")[0] || ""
@@ -1168,6 +1411,8 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [menuOpen, setMenuOpen] = useState(false);
+  /* Settings sub-view: menu buttons open the password form / online store detail */
+  const [settingsView, setSettingsView] = useState<"menu" | "account" | "password" | "online" | "alarms">("menu");
   const [frozenScrolled, setFrozenScrolled] = useState(false);
   const [search, setSearch] = useState("");
   const [specFilter, setSpecFilter] = useState("All");
@@ -1208,6 +1453,40 @@ export default function App() {
   const [alertsOn, setAlertsOn] = useState(false);
   const dismissedRef = useRef<Set<string>>(new Set());
   const snoozedRef = useRef<Map<string, number>>(new Map());
+  const [alarmSound, setAlarmSound] = useState<AlarmSoundId>(() => getAlarmSound());
+  const [morningCfg, setMorningCfgState] = useState(() => loadMorningSettings());
+  const [swReady, setSwReady] = useState(false);
+  const setMorningCfg = (next: { enabled: boolean; time: string }) => {
+    setMorningCfgState(next);
+    saveMorningSettings(next);
+  };
+  const changeAlarmSound = (id: AlarmSoundId) => {
+    setAlarmSound(id);
+    setAlarmSoundStorage(id);
+  };
+  const [muted, setMuted] = useState(() => isAlarmMuted());
+  const toggleMuted = () => {
+    const next = !muted;
+    setMuted(next);
+    setAlarmMutedStorage(next);
+    if (next) {
+      stopAlarmSound();
+      showToast("Alarm sound muted", "info");
+    } else {
+      showToast("Alarm sound on");
+    }
+  };
+  /* Silence + clear the whole ringing popup (fixes sound continuing after X) */
+  const skipAllRinging = () => {
+    stopAlarmSound();
+    setRinging((prev) => {
+      prev.forEach((r) => {
+        dismissedRef.current.add(r.id);
+        if (r.id.startsWith("morning-")) markMorningFired(dataOwnerKey, r.date);
+      });
+      return [];
+    });
+  };
 
   const enableAlerts = async () => {
     try {
@@ -1217,30 +1496,126 @@ export default function App() {
     } catch {
       /* ignore */
     }
-    playAlarmSound(1);
+    const ok = await ensureServiceWorker();
+    setSwReady(ok);
+    playAlarmSound(1, alarmSound);
     setAlertsOn(true);
     showToast("Alerts on — reminders will ring with sound");
   };
   const testAlarmSound = () => {
-    playAlarmSound(2);
-    showToast("Playing test alarm", "info");
+    if (isAlarmMuted()) {
+      showToast("Muted — tap Unmute to hear the test sound", "info");
+      return;
+    }
+    playAlarmSound(2, alarmSound);
+    const label = ALARM_SOUNDS.find((s) => s.id === alarmSound)?.label || "alarm";
+    showToast(`Playing test alarm · ${label}`, "info");
   };
+  /* ---------- Owner-only: team roster + per-user workspaces ---------- */
+  const loadTeamRoster = async () => {
+    if (!isOwner || !online || !cfg || !signedIn) return;
+    setTeamLoading(true);
+    setTeamError("");
+    try {
+      const rows = await fetchOwnerRoster(cfg);
+      const members: TeamMember[] = rows.map((r) => {
+        const b = (r.bio || {}) as Partial<Bio>;
+        return {
+          userId: r.userId,
+          name: String(b.name || ""),
+          email: String(b.email || ""),
+          role: String(b.role || ""),
+          hq: String(b.hq || ""),
+          city: String(b.city || ""),
+          phone: String(b.phone || ""),
+          updatedAt: r.updatedAt,
+        };
+      });
+      members.sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
+      setTeamRoster(members);
+    } catch (e) {
+      setTeamError(e instanceof Error ? e.message : "Could not load users");
+    } finally {
+      setTeamLoading(false);
+    }
+  };
+  const openTeamMember = async (userId: string) => {
+    if (!isOwner || !online || !cfg) return;
+    setSelectedUserId(userId);
+    setSelectedWorkspace(null);
+    setSelectedError("");
+    setSelectedLoading(true);
+    try {
+      const ws = await fetchUserWorkspace(cfg, userId);
+      const arr = (k: string) => (Array.isArray(ws[k]) ? (ws[k] as unknown[]) : []);
+      setSelectedWorkspace({
+        bio: (ws["nutrova-bio-v1"] as Bio) || ({} as Bio),
+        doctors: (ws["nutrova-doctors-v3"] as Doctor[]) || [],
+        patches: (ws["nutrova-patches-v2"] as Patch[]) || [],
+        reminders: arr("nutrova-reminders-v1") as Reminder[],
+        payments: arr("nutrova-payments-v3").map((p) => normPay(p as Partial<Payment>)),
+      });
+    } catch (e) {
+      setSelectedError(e instanceof Error ? e.message : "Could not load this user's data");
+    } finally {
+      setSelectedLoading(false);
+    }
+  };
+  /* Load the roster as soon as the owner is signed in (drawer badge + instant tab) */
+  useEffect(() => {
+    if (isOwner && online && signedIn && teamRoster.length === 0 && !teamLoading) {
+      void loadTeamRoster();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOwner, online, signedIn]);
+  /* Register the service worker once so morning alarms can fire in the background */
+  useEffect(() => {
+    let cancelled = false;
+    ensureServiceWorker().then((ok) => {
+      if (!cancelled) setSwReady(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  /* Keep a fresh briefing cached for the service worker's background alarm */
+  useEffect(() => {
+    if (!signedIn) return;
+    const t = window.setTimeout(() => {
+      try {
+        const today = todayISO();
+        const rems = reminders.filter((r) => !r.done && r.date === today).length;
+        const calls = doctors.filter((d) => doctorCallsOn(d, new Date())).length;
+        const pend = payments.filter((p) => p.status !== "paid");
+        const total = pend.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+        void writeBriefingCache(buildMorningBriefing({ date: today, calls, reminders: rems, pendingCount: pend.length, pendingTotal: total }));
+      } catch {
+        /* ignore */
+      }
+    }, 800);
+    return () => window.clearTimeout(t);
+  }, [reminders, doctors, payments, signedIn]);
   const snoozeReminder = (id: string, mins = 10) => {
+    stopAlarmSound();
     snoozedRef.current.set(id, Date.now() + mins * 60000);
     dismissedRef.current.delete(id);
     setRinging((prev) => prev.filter((x) => x.id !== id));
     showToast(`Snoozed for ${mins} min`, "info");
   };
   const dismissRinging = (id: string) => {
+    stopAlarmSound();
     dismissedRef.current.add(id);
+    if (id.startsWith("morning-")) markMorningFired(dataOwnerKey, id.slice("morning-".length));
     setRinging((prev) => prev.filter((x) => x.id !== id));
   };
   const completeRinging = (r: Reminder) => {
+    stopAlarmSound();
     dismissedRef.current.delete(r.id);
     snoozedRef.current.delete(r.id);
-    setReminders((prev) => prev.map((x) => (x.id === r.id ? { ...x, done: true } : x)));
+    if (r.id.startsWith("morning-")) markMorningFired(dataOwnerKey, r.date);
+    else setReminders((prev) => prev.map((x) => (x.id === r.id ? { ...x, done: true } : x)));
     setRinging((prev) => prev.filter((x) => x.id !== r.id));
-    showToast("Reminder completed");
+    showToast(r.id.startsWith("morning-") ? "Morning briefing done — have a great day!" : "Reminder completed");
   };
 
   /* due-check: every 15s, ring reminders whose date + time has arrived */
@@ -1267,7 +1642,7 @@ export default function App() {
           return cur && !cur.done;
         });
         if (fresh.length > 0) {
-          playAlarmSound(3);
+          playAlarmSound(3, alarmSound);
           fresh.forEach((r) =>
             showBrowserNotification(
               `Reminder: ${r.title}`,
@@ -1277,13 +1652,53 @@ export default function App() {
           );
           return [...alive, ...fresh.map((r) => ({ ...r }))];
         }
+        /* Morning briefing: once per day, after the set time (default before 8 AM) */
+        if (morningCfg.enabled && !ringingIds.has(`morning-${todayISO()}`)) {
+          const today = todayISO();
+          const mid = `morning-${today}`;
+          const snoozedUntil = snoozedRef.current.get(mid) || 0;
+          if (!(now < snoozedUntil) && morningFiredFor(dataOwnerKey) !== today && !dismissedRef.current.has(mid) && now >= morningTimeTodayMs(morningCfg.time)) {
+            if (snoozedUntil) snoozedRef.current.delete(mid);
+            const rems = reminders.filter((r) => !r.done && r.date === today);
+            const calls = doctors.filter((d) => doctorCallsOn(d, new Date()));
+            const pend = payments.filter((p) => p.status !== "paid");
+            const briefing = buildMorningBriefing({
+              date: today,
+              calls: calls.length,
+              reminders: rems.length,
+              pendingCount: pend.length,
+              pendingTotal: pend.reduce((s, p) => s + (Number(p.amount) || 0), 0),
+            });
+            const lines = [
+              ...rems.slice(0, 3).map((r) => `• ${r.time || ""} ${r.title}`.trim()),
+              ...calls.slice(0, 3).map((d) => `• Call: ${d.name} (${d.area || "—"})`),
+            ];
+            playAlarmSound(4, alarmSound);
+            showBrowserNotification("☀️ Nutrova morning briefing", briefing.body, "nutrova-morning-briefing");
+            return [
+              ...alive,
+              {
+                id: mid,
+                doctorName: "",
+                doctorArea: "",
+                title: `Good morning! ${briefing.body}`,
+                date: today,
+                time: morningCfg.time,
+                kind: "Visit" as ReminderKind,
+                notes: lines.length > 0 ? lines.join("\n") : "Nothing scheduled today.",
+                done: false,
+                alarm: true,
+              },
+            ];
+          }
+        }
         return alive.length === prev.length ? prev : alive;
       });
     };
     check();
     const t = window.setInterval(check, 15000);
     return () => window.clearInterval(t);
-  }, [reminders, signedIn]);
+  }, [reminders, doctors, payments, signedIn, morningCfg, alarmSound, dataOwnerKey]);
 
   /* ---------- auth handlers: online store first, local fallback when not connected ---------- */
   const persistSession = (email: string) => {
@@ -1556,6 +1971,7 @@ export default function App() {
 
   /* tab navigation — each tab is its own separate page (Bio shifted out of Dashboard) */
   const goTo = (id: Tab) => {
+    if (id === "settings") setSettingsView("menu");
     setActiveTab(id);
     window.scrollTo({ top: 0, behavior: "auto" });
   };
@@ -1976,12 +2392,8 @@ export default function App() {
     recoveryExchangeTried.current = true;
     setRecoveryExchanging(true);
     const exchange = urlSignal.kind === "code"
-      // Supabase JS auto-detects and exchanges PKCE codes on page load. Read the
-      // resulting session instead of exchanging the one-time code a second time.
-      ? getRecoverySession(cfg).then((s) => {
-          if (!s) throw new Error("Supabase did not establish a recovery session. Open the newest reset email link on this same phone/browser.");
-          return s;
-        })
+      // Explicitly exchange before rendering the new-password form.
+      ? exchangeRecoveryCode(cfg, urlSignal.code)
       : urlSignal.kind === "token-hash"
         ? verifyRecoveryTokenHash(cfg, urlSignal.token_hash)
         : getRecoverySession(cfg).then((s) => {
@@ -2290,8 +2702,8 @@ export default function App() {
     { id: "doctors", label: "Doctors", icon: <Stethoscope className="h-5 w-5" /> },
     { id: "reminders", label: "Reminders", icon: <Bell className="h-5 w-5" /> },
     { id: "payments", label: "Payments", icon: <Wallet className="h-5 w-5" /> },
-    { id: "bio", label: "Bio", icon: <User className="h-5 w-5" /> },
     { id: "settings", label: "Settings", icon: <SettingsIcon className="h-5 w-5" /> },
+    ...(isOwner ? [{ id: "users" as Tab, label: "Users", icon: <Users className="h-5 w-5" /> }] : []),
   ];
 
   return (
@@ -2397,6 +2809,9 @@ export default function App() {
                   {d.id === "payments" && (
                     <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-extrabold ${activeTab === d.id ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{pendingPayments.length}</span>
                   )}
+                  {d.id === "users" && (
+                    <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-extrabold ${activeTab === d.id ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{teamLoading ? "…" : teamRoster.length}</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -2421,7 +2836,7 @@ export default function App() {
             <CloudOff className="h-4 w-4 shrink-0" />
             <span className="min-w-0 flex-1">{syncError || "Online store problem"}</span>
             <button onClick={syncNow} disabled={syncBusy} className="rounded-full bg-rose-600 px-3 py-1 text-white hover:bg-rose-700 disabled:opacity-60">{syncBusy ? "Syncing…" : "Retry"}</button>
-            <button onClick={() => goTo("settings")} className="rounded-full bg-white px-3 py-1 text-rose-700 ring-1 ring-rose-200 hover:bg-rose-50">Settings</button>
+            {isOwner && <button onClick={() => goTo("settings")} className="rounded-full bg-white px-3 py-1 text-rose-700 ring-1 ring-rose-200 hover:bg-rose-50">Settings</button>}
           </div>
         )}
         {/* ------------------------------- dashboard ------------------------------ */}
@@ -2598,7 +3013,7 @@ export default function App() {
               <div className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-800 px-6 pb-5 pt-6 text-white">
                 <div className="flex items-center gap-4">
                   <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-white/15 text-xl font-extrabold ring-1 ring-white/25">
-                    {initials(bio.name || "Business Development Manager")}
+                    {initials(bio.name || accountDisplayName || "User")}
                   </div>
                   <div className="min-w-0">
                     <p className="truncate text-lg font-extrabold leading-tight">{bio.name || "—"}</p>
@@ -2614,10 +3029,12 @@ export default function App() {
                 <p className="flex items-center gap-2.5 font-medium text-slate-700"><Phone className="h-4 w-4 shrink-0 text-emerald-600" /> {bio.phone || "Phone not set"}</p>
                 <p className="flex items-center gap-2.5 font-medium text-slate-700"><Mail className="h-4 w-4 shrink-0 text-emerald-600" /> <a href={`mailto:${bio.email}`} className="truncate underline decoration-slate-200 underline-offset-2 hover:text-emerald-700">{bio.email || "—"}</a></p>
                 <p className="flex items-center gap-2.5 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100"><Check className="h-4 w-4 shrink-0" /> Signed in as {currentEmail || bio.email} · stays until Sign out</p>
+                {isOwner && (
                 <button onClick={() => goTo("settings")} className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-extrabold ring-1 transition ${online ? (syncState === "error" ? "bg-rose-50 text-rose-800 ring-rose-200" : "bg-sky-50 text-sky-800 ring-sky-100 hover:bg-sky-100") : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"}`}>
                   {online ? <Cloud className="h-4 w-4 shrink-0" /> : <CloudOff className="h-4 w-4 shrink-0" />}
                   {online ? (syncState === "error" ? "Online store — problem, open Settings" : syncState === "loading" ? "Online store — syncing…" : "Online store connected · data synced") : "Online store not connected"}
                 </button>
+                )}
                 <div className="grid grid-cols-2 gap-2">
                   <button onClick={() => setShareOpen(true)} className="flex items-center justify-center gap-1.5 rounded-xl bg-amber-400 py-2.5 text-xs font-extrabold text-amber-950 transition hover:bg-amber-300">
                     <Share2 className="h-3.5 w-3.5" /> Share app
@@ -2653,9 +3070,9 @@ export default function App() {
                 <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <BioInput label="Full name" value={bioDraft.name} onChange={(v) => setBioDraft({ ...bioDraft, name: v })} placeholder="Your full name" />
                   <BioInput label="Role" value={bioDraft.role} onChange={(v) => setBioDraft({ ...bioDraft, role: v })} placeholder="Business Development Manager" />
-                  <BioInput label="City" value={bioDraft.city} onChange={(v) => setBioDraft({ ...bioDraft, city: v })} placeholder="Bangalore" />
-                  <BioInput label="State" value={bioDraft.state} onChange={(v) => setBioDraft({ ...bioDraft, state: v })} placeholder="Karnataka" />
-                  <BioInput label="HQ" value={bioDraft.hq} onChange={(v) => setBioDraft({ ...bioDraft, hq: v })} placeholder="Bangalore" />
+                  <BioInput label="City" value={bioDraft.city} onChange={(v) => setBioDraft({ ...bioDraft, city: v })} placeholder="Your city" />
+                  <BioInput label="State" value={bioDraft.state} onChange={(v) => setBioDraft({ ...bioDraft, state: v })} placeholder="Your state" />
+                  <BioInput label="HQ" value={bioDraft.hq} onChange={(v) => setBioDraft({ ...bioDraft, hq: v })} placeholder="Your HQ" />
                   <BioInput label="Phone" value={bioDraft.phone} onChange={(v) => setBioDraft({ ...bioDraft, phone: v })} placeholder="Phone" />
                   <div className="sm:col-span-2">
                     <BioInput label="Email" value={bioDraft.email} onChange={(v) => setBioDraft({ ...bioDraft, email: v })} placeholder="you@nutrova.com" />
@@ -2965,8 +3382,8 @@ export default function App() {
               <button onClick={() => setReminderModal({ open: true, draft: emptyReminder(), editing: false })} className="flex items-center gap-1.5 rounded-full bg-emerald-700 px-5 py-2 text-sm font-extrabold text-white shadow-md shadow-emerald-200 transition hover:bg-emerald-800">
                 <Plus className="h-4 w-4" /> Add Reminder
               </button>
-              <button onClick={alertsOn ? testAlarmSound : enableAlerts} title={alertsOn ? "Play test sound" : "Turn on sound + phone notifications for reminders"} className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-extrabold shadow-sm transition ${alertsOn ? "border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100" : "bg-amber-400 text-amber-950 shadow-md shadow-amber-200 hover:bg-amber-300"}`}>
-                {alertsOn ? <Volume2 className="h-4 w-4" /> : <BellRing className="h-4 w-4" />} {alertsOn ? "Test sound" : "Enable alerts"}
+              <button onClick={() => { goTo("settings"); setSettingsView("alarms"); }} title="Open alarm settings" className="flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-extrabold text-amber-800 shadow-sm transition hover:bg-amber-100">
+                <BellRing className="h-4 w-4" /> Alarms
               </button>
             </div>
           </div>
@@ -3224,143 +3641,337 @@ export default function App() {
         </section>
         )}
 
+        {/* -------------------------------- users (owner only) ------------------------------- */}
+        {activeTab === "users" && (
+        <section id="users" key="tab-users" className="anim-fade-up">
+          {!isOwner ? (
+            <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50 p-10 text-center">
+              <Lock className="mx-auto h-10 w-10 text-slate-300" />
+              <p className="mt-3 font-extrabold text-slate-700">Users is available to the project owner only</p>
+              <p className="mt-1 text-sm text-slate-500">Please sign in as {APP_OWNER.email} to view team accounts.</p>
+            </div>
+          ) : (
+          <>
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Users</h2>
+              <p className="mt-1 text-sm font-medium text-slate-500">
+                {teamLoading ? "Loading accounts…" : `${teamRoster.length} account${teamRoster.length === 1 ? "" : "s"} created`} · select a user to see their full workspace
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={() => { setSelectedUserId(""); setSelectedWorkspace(null); setSelectedError(""); void loadTeamRoster(); }} title="Reload users" className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-600 shadow-sm transition hover:border-emerald-300 hover:text-emerald-700">
+                <RefreshCcw className={`h-4 w-4 ${teamLoading ? "animate-spin" : ""}`} /> Refresh
+              </button>
+            </div>
+          </div>
+
+          {!online ? (
+            <div className="mt-5 rounded-3xl border border-amber-200 bg-amber-50/60 p-6">
+              <p className="text-sm font-extrabold text-amber-900">Online store not connected</p>
+              <p className="mt-1 text-sm font-medium text-amber-800">Connect the online store to list team accounts and open their workspaces. Local accounts on this device: {users.length}.</p>
+              {users.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {users.map((u) => (
+                    <div key={u.email} className="flex items-center gap-3 rounded-2xl bg-white px-4 py-2.5 ring-1 ring-amber-100">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-500 text-xs font-extrabold text-white">{initials(u.name || "?")}</div>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-extrabold text-slate-900">{u.name || "—"}</p>
+                        <p className="truncate text-xs font-semibold text-slate-500">{u.email}{u.hq ? ` · ${u.hq} HQ` : ""}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : selectedUserId && (selectedLoading || selectedWorkspace) ? (
+            selectedLoading && !selectedWorkspace ? (
+              <div className="mt-5 space-y-2.5">
+                <div className="h-11 w-28 animate-pulse rounded-full bg-slate-100" />
+                <div className="h-40 animate-pulse rounded-3xl bg-slate-100" />
+                <div className="h-40 animate-pulse rounded-3xl bg-slate-100" />
+              </div>
+            ) : selectedWorkspace ? (
+            /* ---------- selected user's full workspace (read-only) ---------- */
+            (() => {
+              const m = teamRoster.find((x) => x.userId === selectedUserId);
+              const ws = selectedWorkspace;
+              const openRems = ws.reminders.filter((r) => !r.done).sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`));
+              const pend = ws.payments.filter((p) => p.status !== "paid");
+              const pendTotal = pend.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+              const patchName = (id: string) => ws.patches.find((p) => p.id === id)?.name || "";
+              return (
+                <div className="mt-5 space-y-4">
+                  <button onClick={() => { setSelectedUserId(""); setSelectedWorkspace(null); setSelectedError(""); }} className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-extrabold text-slate-600 shadow-sm transition hover:border-emerald-300 hover:text-emerald-700">
+                    ← All users
+                  </button>
+                  <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+                    <div className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-800 px-5 py-5 text-white sm:px-6">
+                      <div className="flex items-center gap-4">
+                        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-white/15 text-lg font-extrabold ring-1 ring-white/25">
+                          {initials(ws.bio.name || m?.name || "?")}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-lg font-extrabold leading-tight">{ws.bio.name || m?.name || "—"}</p>
+                          <p className="truncate text-sm text-emerald-100/80">{ws.bio.role || "—"}{ws.bio.hq ? ` · ${ws.bio.hq} HQ` : ""}</p>
+                          <p className="truncate text-xs text-emerald-100/60">{ws.bio.email || m?.email || ""}{ws.bio.phone ? ` · ${ws.bio.phone}` : ""}{ws.bio.city ? ` · ${ws.bio.city}${ws.bio.state ? `, ${ws.bio.state}` : ""}` : ""}</p>
+                        </div>
+                        <span className="hidden shrink-0 rounded-full bg-white/15 px-3 py-1 text-[11px] font-extrabold ring-1 ring-white/20 sm:inline">Read-only view</span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 p-4 sm:grid-cols-4 sm:px-5">
+                      {[
+                        { label: "Doctors", value: ws.doctors.length },
+                        { label: "Areas", value: ws.patches.length },
+                        { label: "Open reminders", value: openRems.length },
+                        { label: "Pending", value: `${pend.length} · ${inr(pendTotal)}` },
+                      ].map((s) => (
+                        <div key={s.label} className="rounded-2xl bg-slate-50 px-3 py-2.5 text-center ring-1 ring-slate-200">
+                          <p className="truncate text-base font-extrabold text-slate-900">{s.value}</p>
+                          <p className="text-[10px] font-extrabold uppercase tracking-widest text-slate-500">{s.label}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {selectedError && (
+                    <p className="rounded-2xl bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{selectedError}</p>
+                  )}
+
+                  <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+                    <p className="border-b border-slate-100 bg-slate-50/80 px-5 py-3 text-[11px] font-extrabold uppercase tracking-widest text-slate-500 sm:px-6">Doctor list · {ws.doctors.length}</p>
+                    {ws.doctors.length === 0 ? (
+                      <p className="p-5 text-sm font-semibold text-slate-400">No doctors yet.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+                          <thead>
+                            <tr className="bg-slate-800 text-[11px] font-extrabold uppercase tracking-wider text-white">
+                              <th className="w-10 border-r border-slate-700 px-3 py-2.5 text-center">#</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Doctor</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Specialty</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Area / Patch</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Phone</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Call days</th>
+                              <th className="px-3 py-2.5">Next visit</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {ws.doctors.map((d, idx) => (
+                              <tr key={d.id} className={`border-t border-slate-200 align-top ${idx % 2 ? "bg-slate-50/70" : "bg-white"}`}>
+                                <td className="border-r border-slate-200 px-3 py-2.5 text-center text-xs font-extrabold text-slate-400">{idx + 1}</td>
+                                <td className="border-r border-slate-200 px-3 py-2.5 font-extrabold text-slate-900">{d.name}</td>
+                                <td className="border-r border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-600">{d.specialty || "—"}</td>
+                                <td className="border-r border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-600">{d.area || patchName(d.patchId) || "—"}</td>
+                                <td className="border-r border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-600">{d.phone || "—"}</td>
+                                <td className="border-r border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-600">{describeWeekly(d.callDays || [])}</td>
+                                <td className="px-3 py-2.5 text-xs font-bold text-slate-600">{d.nextVisit ? fmtShort(d.nextVisit) : "Not planned"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+                    <p className="border-b border-slate-100 bg-slate-50/80 px-5 py-3 text-[11px] font-extrabold uppercase tracking-widest text-slate-500 sm:px-6">Payment invoices · {ws.payments.length}</p>
+                    {ws.payments.length === 0 ? (
+                      <p className="p-5 text-sm font-semibold text-slate-400">No purchase orders yet.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[860px] border-collapse text-left text-sm">
+                          <thead>
+                            <tr className="bg-slate-800 text-[11px] font-extrabold uppercase tracking-wider text-white">
+                              <th className="w-10 border-r border-slate-700 px-3 py-2.5 text-center">#</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Invoice</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Doctor</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Products</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5 text-right">Amount</th>
+                              <th className="border-r border-slate-700 px-3 py-2.5">Due</th>
+                              <th className="px-3 py-2.5">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {ws.payments.map((p, idx) => {
+                              const st = p.status === "paid" ? "paid" : isCriticalOverdue(p.dueDate) ? "overdue" : "pending";
+                              return (
+                                <tr key={p.id} className={`border-t border-slate-200 align-top ${idx % 2 ? "bg-slate-50/70" : "bg-white"}`}>
+                                  <td className="border-r border-slate-200 px-3 py-2.5 text-center text-xs font-extrabold text-slate-400">{idx + 1}</td>
+                                  <td className="border-r border-slate-200 px-3 py-2.5 font-mono text-xs font-extrabold text-slate-700">{p.invoiceNo || "—"}</td>
+                                  <td className="border-r border-slate-200 px-3 py-2.5 text-xs font-bold text-slate-800">{p.doctorName || "—"}</td>
+                                  <td className="min-w-[220px] border-r border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-600">
+                                    {p.items.length > 0 ? p.items.slice(0, 3).map((it) => `${shortProduct(it.product)} ×${it.qty}`).join(" · ") + (p.items.length > 3 ? ` +${p.items.length - 3} more` : "") : (p.purpose || "—")}
+                                  </td>
+                                  <td className="whitespace-nowrap border-r border-slate-200 px-3 py-2.5 text-right font-extrabold text-slate-900">{inr(p.amount)}</td>
+                                  <td className="whitespace-nowrap border-r border-slate-200 px-3 py-2.5 text-xs font-bold text-slate-600">{fmtDate(p.dueDate)}</td>
+                                  <td className="px-3 py-2.5">
+                                    <span className={`rounded-full px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wide ${st === "paid" ? "bg-emerald-100 text-emerald-800" : st === "overdue" ? "bg-rose-600 text-white" : "bg-amber-100 text-amber-800"}`}>{st}</span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+                    <p className="border-b border-slate-100 bg-slate-50/80 px-5 py-3 text-[11px] font-extrabold uppercase tracking-widest text-slate-500 sm:px-6">Open reminders · {openRems.length}</p>
+                    {openRems.length === 0 ? (
+                      <p className="p-5 text-sm font-semibold text-slate-400">No open reminders.</p>
+                    ) : (
+                      <div className="space-y-2 p-4 sm:px-5">
+                        {openRems.slice(0, 8).map((r) => (
+                          <div key={r.id} className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-2.5 ring-1 ring-slate-100">
+                            <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-extrabold ${KIND_COLORS[r.kind]}`}>{r.kind}</span>
+                            <p className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{r.title}</p>
+                            <span className="shrink-0 text-xs font-semibold text-slate-500">{fmtShort(r.date)} · {r.time || "—"}</span>
+                          </div>
+                        ))}
+                        {openRems.length > 8 && <p className="text-xs font-bold text-slate-400">Showing 8 of {openRems.length} open reminders.</p>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()
+            ) : null
+          ) : (
+            <>
+              <div className="mt-4 flex flex-1 items-center gap-2.5 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm transition focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                <Search className="h-5 w-5 shrink-0 text-emerald-600" />
+                <input value={teamSearch} onChange={(e) => setTeamSearch(e.target.value)} placeholder="Search name / email / HQ / phone" className="w-full bg-transparent text-[15px] font-medium text-slate-800 outline-none placeholder:text-slate-400" />
+                {teamSearch && <button onClick={() => setTeamSearch("")} className="rounded-full p-1 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
+              </div>
+              {teamLoading && (
+                <div className="mt-5 space-y-2.5">
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="flex animate-pulse items-center gap-3 rounded-3xl border border-slate-200 bg-white p-4">
+                      <div className="h-11 w-11 rounded-2xl bg-slate-100" />
+                      <div className="flex-1 space-y-2">
+                        <div className="h-3.5 w-1/3 rounded bg-slate-100" />
+                        <div className="h-3 w-1/2 rounded bg-slate-100" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {teamError && !teamLoading && (
+                <div className="mt-5 rounded-3xl border border-rose-200 bg-rose-50 p-5">
+                  <p className="text-sm font-extrabold text-rose-700">{teamError}</p>
+                  <p className="mt-1 text-xs font-medium text-rose-600">If this is the first run, open Settings → Database setup and run the SQL again to add the owner read policy.</p>
+                  <button onClick={() => void loadTeamRoster()} className="mt-3 rounded-full bg-rose-600 px-4 py-2 text-xs font-extrabold text-white hover:bg-rose-700">Retry</button>
+                </div>
+              )}
+              {!teamLoading && !teamError && teamRoster.length === 0 && (
+                <div className="mt-5 rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
+                  <Users className="mx-auto h-10 w-10 text-slate-300" />
+                  <p className="mt-3 font-extrabold text-slate-700">No accounts found yet</p>
+                  <p className="mt-1 text-sm text-slate-500">New accounts appear here after they sign up and open the app once.</p>
+                </div>
+              )}
+              {!teamLoading && !teamError && teamRoster.length > 0 && (() => {
+                const q = teamSearch.trim().toLowerCase();
+                const list = q
+                  ? teamRoster.filter((m) => [m.name, m.email, m.hq, m.phone, m.role, m.city].join(" ").toLowerCase().includes(q))
+                  : teamRoster;
+                if (list.length === 0) {
+                  return (
+                    <div className="mt-5 rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
+                      <Search className="mx-auto h-10 w-10 text-slate-300" />
+                      <p className="mt-3 font-extrabold text-slate-700">No users match “{teamSearch.trim()}”</p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {list.map((m) => (
+                      <button key={m.userId} onClick={() => void openTeamMember(m.userId)} className="group flex items-center gap-3 rounded-3xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-emerald-200 hover:shadow-lg">
+                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-700 text-sm font-extrabold text-white">{initials(m.name || m.email || "?")}</div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[15px] font-extrabold text-slate-900">{m.name || "—"}{m.email.toLowerCase() === APP_OWNER.email.toLowerCase() && <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 align-middle text-[10px] font-extrabold uppercase tracking-wide text-amber-800">Owner</span>}</p>
+                          <p className="truncate text-xs font-semibold text-slate-500">{m.email || "—"}</p>
+                          <p className="truncate text-xs font-semibold text-slate-500">{m.role || "—"}{m.hq ? ` · ${m.hq} HQ` : ""}{m.phone ? ` · ${m.phone}` : ""}</p>
+                        </div>
+                        <ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-emerald-600" />
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
+            </>
+          )}
+          </>
+          )}
+        </section>
+        )}
+
         {/* -------------------------------- settings ------------------------------- */}
         {activeTab === "settings" && (
         <section id="settings" key="tab-settings" className="anim-fade-up">
+          {settingsView === "menu" ? (
+          <>
           <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Settings</h2>
-          <p className="mt-1 text-sm font-medium text-slate-500">Account, online store and app</p>
+          <p className="mt-1 text-sm font-medium text-slate-500">{isOwner ? "Account, password, online store and app" : "Account, password and app"}</p>
 
           <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
-            {/* ---------- Account ---------- */}
+            {/* ---------- Settings menu buttons ---------- */}
             <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
-                <User className="h-4 w-4 text-emerald-600" />
-                <p className="text-xs font-extrabold uppercase tracking-widest text-slate-600">Account</p>
+                <SettingsIcon className="h-4 w-4 text-slate-500" />
+                <p className="text-xs font-extrabold uppercase tracking-widest text-slate-600">Manage</p>
               </div>
-              <div className="space-y-4 p-5 sm:p-6">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-700 text-sm font-extrabold text-white">{initials(bio.name || "User")}</div>
-                  <div className="min-w-0">
-                    <p className="truncate text-base font-extrabold text-slate-900">{bio.name || "—"}</p>
-                    <p className="truncate text-xs font-semibold text-slate-500">{bio.role || "Business Development Manager"}{bio.hq ? ` · ${bio.hq} HQ` : ""}</p>
-                    <p className="truncate text-xs font-medium text-slate-400">{currentEmail || bio.email || "—"}</p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button onClick={() => goTo("bio")} className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white py-2.5 text-xs font-extrabold text-slate-700 transition hover:bg-slate-50">
-                    <Pencil className="h-3.5 w-3.5" /> Edit profile
-                  </button>
-                  <button onClick={handleSignOut} className="flex items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 py-2.5 text-xs font-extrabold text-rose-600 transition hover:bg-rose-100">
-                    <LogOut className="h-3.5 w-3.5" /> Sign out
-                  </button>
-                </div>
-
-                <div className="rounded-2xl border border-sky-100 bg-sky-50/70 p-3.5">
-                  <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-wider text-sky-800">
-                    <Lock className="h-3.5 w-3.5" /> Private workspace
-                  </p>
-                  <p className="mt-1 text-xs font-medium leading-relaxed text-sky-900/75">
-                    Doctors, area patches, reminders, purchase orders and HQ are saved only to {currentEmail || "this account"}. New accounts get their own empty doctor list. Set or update your HQ in Bio.
-                  </p>
-                </div>
-
-                {/* change password */}
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
-                  <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest text-slate-500"><Lock className="h-3.5 w-3.5" /> Change password</p>
-                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
-                      <input type={showNewPw ? "text" : "password"} value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="New password" autoComplete="new-password" className="w-full bg-transparent py-1 text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
-                      <button type="button" onClick={() => setShowNewPw(!showNewPw)} title={showNewPw ? "Hide password" : "Show password"} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-emerald-700">
-                        {showNewPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                      </button>
-                    </div>
-                    <input type={showNewPw ? "text" : "password"} value={newPw2} onChange={(e) => setNewPw2(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleChangePassword()} placeholder="Confirm new password" autoComplete="new-password" className={inputCls} />
-                  </div>
-                  {pwMsg && <p className={`mt-2 rounded-xl px-3 py-2 text-xs font-bold ring-1 ${pwMsg.ok ? "bg-emerald-50 text-emerald-800 ring-emerald-200" : "bg-rose-50 text-rose-700 ring-rose-200"}`}>{pwMsg.text}</p>}
-                  <button onClick={handleChangePassword} disabled={pwBusy} className="mt-3 rounded-xl bg-emerald-700 px-5 py-2.5 text-xs font-extrabold text-white transition hover:bg-emerald-800 disabled:opacity-60">
-                    {pwBusy ? "Updating…" : "Update password"}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* ---------- Online store (locked connection) ---------- */}
-            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
-                <p className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-widest text-slate-600"><Cloud className="h-4 w-4 text-sky-600" /> Online store</p>
-                <span className={`rounded-full px-3 py-1 text-[11px] font-extrabold ${syncState === "error" ? "bg-rose-100 text-rose-700" : syncState === "loading" || syncBusy ? "bg-slate-100 text-slate-600" : "bg-emerald-100 text-emerald-800"}`}>
-                  {syncState === "error" ? "Problem" : syncState === "loading" || syncBusy ? "Syncing…" : "Connected"}
-                </span>
-              </div>
-              <div className="space-y-4 p-5 sm:p-6">
-                <div className="flex flex-wrap items-center gap-3">
-                  <p className="min-w-0 flex-1 text-xs font-semibold text-slate-500">
-                    {lastSync ? `Last synced at ${new Date(lastSync).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}` : "Not synced yet in this session"}
-                  </p>
-                  <button onClick={syncNow} disabled={syncBusy || syncState === "loading"} className="flex items-center gap-1.5 rounded-full bg-sky-600 px-4 py-2 text-xs font-extrabold text-white transition hover:bg-sky-700 disabled:opacity-60">
-                    <RefreshCcw className={`h-3.5 w-3.5 ${syncBusy ? "animate-spin" : ""}`} /> {syncBusy ? "Syncing…" : "Sync now"}
-                  </button>
-                </div>
-                {syncState === "error" && syncError && (
-                  <p className="rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{syncError}</p>
+              <div className="space-y-2 p-5 sm:p-6">
+                <button onClick={() => setSettingsView("account")} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 text-left transition hover:border-emerald-300 hover:bg-emerald-50/50">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700"><User className="h-5 w-5" /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-extrabold text-slate-900">Account</span>
+                    <span className="block truncate text-xs font-medium text-slate-500">{bio.name || currentEmail || "Your profile & sign out"}</span>
+                  </span>
+                  <ChevronRight className="h-5 w-5 shrink-0 text-slate-300" />
+                </button>
+                <button onClick={() => setSettingsView("password")} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 text-left transition hover:border-emerald-300 hover:bg-emerald-50/50">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700"><Lock className="h-5 w-5" /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-extrabold text-slate-900">Change password</span>
+                    <span className="block text-xs font-medium text-slate-500">Update your sign-in password</span>
+                  </span>
+                  <ChevronRight className="h-5 w-5 shrink-0 text-slate-300" />
+                </button>
+                <button onClick={() => setSettingsView("alarms")} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 text-left transition hover:border-amber-300 hover:bg-amber-50/50">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700"><BellRing className="h-5 w-5" /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-extrabold text-slate-900">Alarms & Sounds</span>
+                    <span className="block truncate text-xs font-medium text-slate-500">Reminder alerts · {ALARM_SOUNDS.find((s) => s.id === alarmSound)?.label || "Sound"} · Morning {morningCfg.enabled ? morningCfg.time : "off"}</span>
+                  </span>
+                  <ChevronRight className="h-5 w-5 shrink-0 text-slate-300" />
+                </button>
+                {isOwner && (
+                <button onClick={() => setSettingsView("online")} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 text-left transition hover:border-sky-300 hover:bg-sky-50/50">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-100 text-sky-700"><Cloud className="h-5 w-5" /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-2 text-sm font-extrabold text-slate-900">
+                      Online store
+                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-amber-800">Owner</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-extrabold ${syncState === "error" ? "bg-rose-100 text-rose-700" : syncState === "loading" || syncBusy ? "bg-slate-100 text-slate-600" : "bg-emerald-100 text-emerald-800"}`}>
+                        {syncState === "error" ? "Problem" : syncState === "loading" || syncBusy ? "Syncing…" : "Connected"}
+                      </span>
+                    </span>
+                    <span className="block text-xs font-medium text-slate-500">Sync status, connection & database setup</span>
+                  </span>
+                  <ChevronRight className="h-5 w-5 shrink-0 text-slate-300" />
+                </button>
                 )}
-
-                {/* connection details — read-only, can't be edited */}
-                <div className="space-y-2.5 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-                  <div>
-                    <p className="mb-1 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Project URL</p>
-                    <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
-                      <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                      <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-slate-700">{cfg?.url || "—"}</span>
-                    </div>
-                  </div>
-                  <div>
-                    <p className="mb-1 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Publishable key</p>
-                    <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
-                      <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                      <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-slate-700">{cfg ? maskKey(cfg.key) : "—"}</span>
-                    </div>
-                  </div>
-                  <p className="flex items-start gap-1.5 text-[11px] font-semibold leading-relaxed text-slate-500">
-                    <Lock className="mt-0.5 h-3 w-3 shrink-0" /> Locked — built into the app. The URL and key always stay the same and can't be edited.
-                  </p>
-                </div>
-
-                {/* what's saved online */}
-                <div>
-                  <p className="mb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Saved in your account</p>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                    {[
-                      { label: "Doctors", value: doctors.length },
-                      { label: "Reminders", value: reminders.length },
-                      { label: "Orders", value: payments.length },
-                      { label: "Areas", value: patches.length },
-                    ].map((s) => (
-                      <div key={s.label} className="rounded-xl bg-sky-50 px-3 py-2 text-center ring-1 ring-sky-100">
-                        <p className="text-lg font-extrabold text-sky-900">{s.value}</p>
-                        <p className="text-[10px] font-extrabold uppercase tracking-wider text-sky-700">{s.label}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* one-time database setup (read-only SQL to run in Supabase) */}
-                <details className="group rounded-2xl border border-slate-200 bg-white" open={/nutrova_store|SQL setup/i.test(syncError)}>
-                  <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-xs font-extrabold text-slate-700 [&::-webkit-details-marker]:hidden">
-                    <Database className="h-4 w-4 shrink-0 text-slate-400" />
-                    <span className="min-w-0 flex-1">Database setup (one time, in Supabase)</span>
-                    <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition group-open:rotate-180" />
-                  </summary>
-                  <div className="space-y-3 border-t border-slate-100 px-4 py-3">
-                    <p className="text-[11px] font-semibold leading-relaxed text-slate-500">
-                      Only needed once: Supabase → SQL Editor → paste and run. Also turn off “Confirm email” (Authentication → Providers → Email) so new accounts can sign in right away.
-                    </p>
-                    <button onClick={copySetupSql} className="flex items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-[11px] font-extrabold text-white hover:bg-slate-700">
-                      {sqlCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />} {sqlCopied ? "Copied" : "Copy SQL"}
-                    </button>
-                    <pre className="max-h-48 overflow-auto rounded-xl bg-slate-900 p-3 text-[10.5px] leading-relaxed text-emerald-200">{SETUP_SQL}</pre>
-                  </div>
-                </details>
+                <button onClick={() => setShareOpen(true)} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 text-left transition hover:border-amber-300 hover:bg-amber-50/50">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-800"><Share2 className="h-5 w-5" /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-extrabold text-slate-900">Share app</span>
+                    <span className="block text-xs font-medium text-slate-500">Send the app link or QR code</span>
+                  </span>
+                  <ChevronRight className="h-5 w-5 shrink-0 text-slate-300" />
+                </button>
               </div>
             </div>
 
@@ -3370,14 +3981,7 @@ export default function App() {
                 <Smartphone className="h-4 w-4 text-amber-600" />
                 <p className="text-xs font-extrabold uppercase tracking-widest text-slate-600">App</p>
               </div>
-              <div className="grid grid-cols-1 gap-5 p-5 sm:p-6 md:grid-cols-3">
-                <div className="space-y-2">
-                  <p className="text-sm font-extrabold text-slate-900">Share with your team</p>
-                  <p className="text-xs font-medium leading-relaxed text-slate-500">Send the app link or QR code — teammates create their own account.</p>
-                  <button onClick={() => setShareOpen(true)} className="flex items-center gap-1.5 rounded-full bg-amber-400 px-4 py-2 text-xs font-extrabold text-amber-950 transition hover:bg-amber-300">
-                    <Share2 className="h-3.5 w-3.5" /> Share app
-                  </button>
-                </div>
+              <div className="grid grid-cols-1 gap-5 p-5 sm:p-6 md:grid-cols-2">
                 <div className="space-y-2">
                   <p className="text-sm font-extrabold text-slate-900">Install on your phone</p>
                   <p className="text-xs font-medium leading-relaxed text-slate-500">
@@ -3394,6 +3998,255 @@ export default function App() {
               </div>
             </div>
           </div>
+          </>
+          ) : settingsView === "password" ? (
+          <>
+          <button onClick={() => setSettingsView("menu")} className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-extrabold text-slate-600 shadow-sm transition hover:border-emerald-300 hover:text-emerald-700">
+            ← Back to Settings
+          </button>
+          <h2 className="mt-4 text-3xl font-extrabold tracking-tight text-slate-900">Change password</h2>
+          <p className="mt-1 text-sm font-medium text-slate-500">Signed in as {currentEmail || bio.email || "—"}</p>
+
+          <div className="mt-5 max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
+              <Lock className="h-4 w-4 text-emerald-600" />
+              <p className="text-xs font-extrabold uppercase tracking-widest text-slate-600">New password</p>
+            </div>
+            <div className="space-y-3 p-5 sm:p-6">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <input type={showNewPw ? "text" : "password"} value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="New password" autoComplete="new-password" className="w-full bg-transparent py-1 text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
+                  <button type="button" onClick={() => setShowNewPw(!showNewPw)} title={showNewPw ? "Hide password" : "Show password"} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-emerald-700">
+                    {showNewPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+                <input type={showNewPw ? "text" : "password"} value={newPw2} onChange={(e) => setNewPw2(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleChangePassword()} placeholder="Confirm new password" autoComplete="new-password" className={inputCls} />
+              </div>
+              {pwMsg && <p className={`rounded-xl px-3 py-2 text-xs font-bold ring-1 ${pwMsg.ok ? "bg-emerald-50 text-emerald-800 ring-emerald-200" : "bg-rose-50 text-rose-700 ring-rose-200"}`}>{pwMsg.text}</p>}
+              <button onClick={handleChangePassword} disabled={pwBusy} className="rounded-xl bg-emerald-700 px-5 py-2.5 text-xs font-extrabold text-white transition hover:bg-emerald-800 disabled:opacity-60">
+                {pwBusy ? "Updating…" : "Update password"}
+              </button>
+            </div>
+          </div>
+          </>
+          ) : settingsView === "account" ? (
+          <>
+          <button onClick={() => setSettingsView("menu")} className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-extrabold text-slate-600 shadow-sm transition hover:border-emerald-300 hover:text-emerald-700">
+            ← Back to Settings
+          </button>
+          <h2 className="mt-4 text-3xl font-extrabold tracking-tight text-slate-900">Account</h2>
+          <p className="mt-1 text-sm font-medium text-slate-500">Your profile and sign out</p>
+
+          <div className="mt-5 max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="space-y-4 p-5 sm:p-6">
+              <div className="flex items-center gap-3">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-700 text-sm font-extrabold text-white">{initials(bio.name || "User")}</div>
+                <div className="min-w-0">
+                  <p className="truncate text-base font-extrabold text-slate-900">{bio.name || "—"}</p>
+                  <p className="truncate text-xs font-semibold text-slate-500">{bio.role || "Business Development Manager"}{bio.hq ? ` · ${bio.hq} HQ` : ""}</p>
+                  <p className="truncate text-xs font-medium text-slate-400">{currentEmail || bio.email || "—"}</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => goTo("bio")} className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white py-2.5 text-xs font-extrabold text-slate-700 transition hover:bg-slate-50">
+                  <Pencil className="h-3.5 w-3.5" /> Edit profile
+                </button>
+                <button onClick={handleSignOut} className="flex items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 py-2.5 text-xs font-extrabold text-rose-600 transition hover:bg-rose-100">
+                  <LogOut className="h-3.5 w-3.5" /> Sign out
+                </button>
+              </div>
+
+              <div className="rounded-2xl border border-sky-100 bg-sky-50/70 p-3.5">
+                <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-wider text-sky-800">
+                  <Lock className="h-3.5 w-3.5" /> Private workspace
+                </p>
+                <p className="mt-1 text-xs font-medium leading-relaxed text-sky-900/75">
+                  Doctors, area patches, reminders, purchase orders and HQ are saved only to {currentEmail || "this account"}. New accounts get their own empty doctor list. Set or update your HQ in Bio.
+                </p>
+              </div>
+            </div>
+          </div>
+          </>
+          ) : settingsView === "alarms" ? (
+          <>
+          <button onClick={() => setSettingsView("menu")} className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-extrabold text-slate-600 shadow-sm transition hover:border-emerald-300 hover:text-emerald-700">
+            ← Back to Settings
+          </button>
+          <h2 className="mt-4 text-3xl font-extrabold tracking-tight text-slate-900">Alarms & Sounds</h2>
+          <p className="mt-1 text-sm font-medium text-slate-500">Reminder alerts, alarm sound and morning alarm</p>
+
+          <div className="mt-5 max-w-2xl space-y-4">
+            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
+                <BellRing className="h-4 w-4 text-emerald-600" />
+                <p className="text-xs font-extrabold uppercase tracking-widest text-slate-600">Reminder alerts</p>
+              </div>
+              <div className="space-y-3 p-5 sm:p-6">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button onClick={alertsOn ? testAlarmSound : enableAlerts} title={alertsOn ? "Play test sound" : "Turn on sound + phone notifications for reminders"} className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-extrabold shadow-sm transition ${alertsOn ? "border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100" : "bg-amber-400 text-amber-950 shadow-md shadow-amber-200 hover:bg-amber-300"}`}>
+                    {alertsOn ? <Volume2 className="h-4 w-4" /> : <BellRing className="h-4 w-4" />} {alertsOn ? "Test sound" : "Enable alerts"}
+                  </button>
+                  <button onClick={toggleMuted} title={muted ? "Unmute all alarm sounds" : "Mute all alarm sounds"} className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-extrabold shadow-sm transition ${muted ? "bg-slate-900 text-white hover:bg-slate-700" : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}>
+                    {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />} {muted ? "Muted" : "Mute"}
+                  </button>
+                </div>
+                <p className="text-xs font-medium leading-relaxed text-slate-500">
+                  {alertsOn ? "Alerts are on — reminders ring with sound when due." : "Turn alerts on once to allow sound and phone notifications."} Mute silences every alarm sound until you unmute.
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
+                <Volume2 className="h-4 w-4 text-emerald-600" />
+                <p className="text-xs font-extrabold uppercase tracking-widest text-slate-600">Alarm sound</p>
+              </div>
+              <div className="space-y-2 p-5 sm:p-6">
+                {ALARM_SOUNDS.map((s) => {
+                  const selected = alarmSound === s.id;
+                  return (
+                    <button key={s.id} onClick={() => { changeAlarmSound(s.id); playAlarmSound(1, s.id, true); }} title={`Use ${s.label}`} className={`flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left transition ${selected ? "border-emerald-500 bg-emerald-50 shadow-sm" : "border-slate-200 bg-white hover:border-emerald-300 hover:bg-emerald-50/50"}`}>
+                      <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${selected ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-500"}`}>
+                        {selected ? <Check className="h-4 w-4" strokeWidth={3} /> : <Volume2 className="h-4 w-4" />}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-extrabold text-slate-900">{s.label}</span>
+                        <span className="block text-xs font-medium text-slate-500">{s.hint}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+                <p className="text-xs font-medium text-slate-500">Tap a sound to select it — it plays once so you can hear it.</p>
+              </div>
+            </div>
+
+            <div className="overflow-hidden rounded-3xl border border-amber-200 bg-gradient-to-r from-amber-50 via-white to-orange-50 shadow-sm">
+              <div className="flex items-center gap-2 border-b border-amber-100 px-5 py-4 sm:px-6">
+                <AlarmClock className="h-4 w-4 text-amber-600" />
+                <p className="text-xs font-extrabold uppercase tracking-widest text-amber-800">Morning alarm · before 8 AM</p>
+              </div>
+              <div className="space-y-3 p-5 sm:p-6">
+                <p className="text-xs font-medium leading-relaxed text-slate-500">
+                  Rings once daily with today's calls, reminders & pending payments. Works in the app, and in the background once the app is installed with notifications allowed{swReady ? "" : " (installing background support…)"}.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => setMorningCfg({ ...morningCfg, enabled: !morningCfg.enabled })}
+                    className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-xs font-extrabold transition ${morningCfg.enabled ? "bg-emerald-700 text-white shadow" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}
+                  >
+                    <BellRing className="h-3.5 w-3.5" /> {morningCfg.enabled ? "On" : "Off"}
+                  </button>
+                  <input
+                    type="time"
+                    value={morningCfg.time}
+                    onChange={(e) => setMorningCfg({ ...morningCfg, time: e.target.value || "07:45" })}
+                    title="Morning alarm time"
+                    className="rounded-full border border-amber-200 bg-white px-3 py-2 text-xs font-extrabold text-slate-700 outline-none focus:border-amber-400"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+          </>
+          ) : isOwner ? (
+          <>
+          <button onClick={() => setSettingsView("menu")} className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-extrabold text-slate-600 shadow-sm transition hover:border-emerald-300 hover:text-emerald-700">
+            ← Back to Settings
+          </button>
+          <h2 className="mt-4 text-3xl font-extrabold tracking-tight text-slate-900">Online store</h2>
+          <p className="mt-1 text-sm font-medium text-slate-500">Owner only · connection, sync and database setup</p>
+
+          <div className="mt-5 max-w-3xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-4 sm:px-6">
+              <p className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-widest text-slate-600"><Cloud className="h-4 w-4 text-sky-600" /> Online store</p>
+              <span className={`rounded-full px-3 py-1 text-[11px] font-extrabold ${syncState === "error" ? "bg-rose-100 text-rose-700" : syncState === "loading" || syncBusy ? "bg-slate-100 text-slate-600" : "bg-emerald-100 text-emerald-800"}`}>
+                {syncState === "error" ? "Problem" : syncState === "loading" || syncBusy ? "Syncing…" : "Connected"}
+              </span>
+            </div>
+            <div className="space-y-4 p-5 sm:p-6">
+              <div className="flex flex-wrap items-center gap-3">
+                <p className="min-w-0 flex-1 text-xs font-semibold text-slate-500">
+                  {lastSync ? `Last synced at ${new Date(lastSync).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}` : "Not synced yet in this session"}
+                </p>
+                <button onClick={syncNow} disabled={syncBusy || syncState === "loading"} className="flex items-center gap-1.5 rounded-full bg-sky-600 px-4 py-2 text-xs font-extrabold text-white transition hover:bg-sky-700 disabled:opacity-60">
+                  <RefreshCcw className={`h-3.5 w-3.5 ${syncBusy ? "animate-spin" : ""}`} /> {syncBusy ? "Syncing…" : "Sync now"}
+                </button>
+              </div>
+              {syncState === "error" && syncError && (
+                <p className="rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{syncError}</p>
+              )}
+
+              {/* connection details — read-only, can't be edited */}
+              <div className="space-y-2.5 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+                <div>
+                  <p className="mb-1 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Project URL</p>
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                    <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-slate-700">{cfg?.url || "—"}</span>
+                  </div>
+                </div>
+                <div>
+                  <p className="mb-1 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Publishable key</p>
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                    <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-slate-700">{cfg ? maskKey(cfg.key) : "—"}</span>
+                  </div>
+                </div>
+                <p className="flex items-start gap-1.5 text-[11px] font-semibold leading-relaxed text-slate-500">
+                  <Lock className="mt-0.5 h-3 w-3 shrink-0" /> Locked — built into the app. The URL and key always stay the same and can't be edited.
+                </p>
+              </div>
+
+              {/* what's saved online */}
+              <div>
+                <p className="mb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Saved in your account</p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {[
+                    { label: "Doctors", value: doctors.length },
+                    { label: "Reminders", value: reminders.length },
+                    { label: "Orders", value: payments.length },
+                    { label: "Areas", value: patches.length },
+                  ].map((s) => (
+                    <div key={s.label} className="rounded-xl bg-sky-50 px-3 py-2 text-center ring-1 ring-sky-100">
+                      <p className="text-lg font-extrabold text-sky-900">{s.value}</p>
+                      <p className="text-[10px] font-extrabold uppercase tracking-wider text-sky-700">{s.label}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* one-time database setup (read-only SQL to run in Supabase) — owner only */}
+              <details className="group rounded-2xl border border-slate-200 bg-white" open={/nutrova_store|SQL setup/i.test(syncError)}>
+                <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-xs font-extrabold text-slate-700 [&::-webkit-details-marker]:hidden">
+                  <Database className="h-4 w-4 shrink-0 text-slate-400" />
+                  <span className="min-w-0 flex-1">Database setup (one time, in Supabase)</span>
+                  <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition group-open:rotate-180" />
+                </summary>
+                <div className="space-y-3 border-t border-slate-100 px-4 py-3">
+                  <p className="text-[11px] font-semibold leading-relaxed text-slate-500">
+                    Only needed once: Supabase → SQL Editor → paste and run. Also turn off “Confirm email” (Authentication → Providers → Email) so new accounts can sign in right away.
+                  </p>
+                  <button onClick={copySetupSql} className="flex items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-[11px] font-extrabold text-white hover:bg-slate-700">
+                    {sqlCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />} {sqlCopied ? "Copied" : "Copy SQL"}
+                  </button>
+                  <pre className="max-h-48 overflow-auto rounded-xl bg-slate-900 p-3 text-[10.5px] leading-relaxed text-emerald-200">{SETUP_SQL}</pre>
+                </div>
+              </details>
+            </div>
+          </div>
+          </>
+          ) : (
+          <>
+          <button onClick={() => setSettingsView("menu")} className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-extrabold text-slate-600 shadow-sm transition hover:border-emerald-300 hover:text-emerald-700">
+            ← Back to Settings
+          </button>
+          <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50 p-10 text-center">
+            <Lock className="mx-auto h-10 w-10 text-slate-300" />
+            <p className="mt-3 font-extrabold text-slate-700">Online store is available to the project owner only</p>
+            <p className="mt-1 text-sm text-slate-500">Your data still syncs automatically in the background.</p>
+          </div>
+          </>
+          )}
         </section>
         )}
       </main>
@@ -3878,10 +4731,13 @@ export default function App() {
                   <p className="text-lg font-extrabold leading-tight">Reminder alarm!</p>
                   <p className="text-xs font-bold opacity-80">{ringing.length} task{ringing.length > 1 ? "s" : ""} due now</p>
                 </div>
-                <button onClick={() => playAlarmSound(2)} title="Replay sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/90 text-amber-700 shadow transition hover:bg-white">
-                  <Volume2 className="h-5 w-5" />
+                <button onClick={() => playAlarmSound(2, alarmSound, true)} title="Replay sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/90 text-amber-700 shadow transition hover:bg-white">
+                  <RefreshCcw className="h-5 w-5" />
                 </button>
-                <button onClick={() => setRinging([])} title="Skip alarm" aria-label="Skip alarm" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
+                <button onClick={toggleMuted} title={muted ? "Unmute alarm sound" : "Mute alarm sound"} aria-label={muted ? "Unmute alarm sound" : "Mute alarm sound"} className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full shadow transition ${muted ? "bg-slate-900 text-white hover:bg-slate-700" : "bg-white/90 text-amber-700 hover:bg-white"}`}>
+                  {muted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
+                </button>
+                <button onClick={skipAllRinging} title="Skip alarm" aria-label="Skip alarm" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
                   <X className="h-5 w-5" />
                 </button>
               </div>
@@ -3913,7 +4769,7 @@ export default function App() {
               ))}
             </div>
             <div className="border-t border-slate-100 p-4">
-              <button onClick={() => { setRinging([]); goTo("reminders"); }} className="w-full rounded-xl bg-slate-900 py-2.5 text-sm font-extrabold text-white transition hover:bg-slate-700">
+              <button onClick={() => { skipAllRinging(); goTo("reminders"); }} className="w-full rounded-xl bg-slate-900 py-2.5 text-sm font-extrabold text-white transition hover:bg-slate-700">
                 Open Reminders
               </button>
             </div>
