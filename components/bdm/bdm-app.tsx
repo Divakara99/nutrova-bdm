@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlarmClock,
   Bell,
@@ -50,15 +50,17 @@ import {
   adoptRecoverySession,
   clearSession,
   clearUrlAuthParams,
-  exchangeRecoveryCode,
   fetchAll,
+  getRecoverySession,
   getUrlRecoverySignal,
   loadSession,
+  listenForPasswordRecovery,
   maskKey,
   readConfig,
   requestPasswordReset,
   saveKey,
   signInRemote,
+  signOutRemote,
   signUpRemote,
   updatePasswordRemote,
   verifyRecoveryTokenHash,
@@ -161,6 +163,7 @@ interface AppUser {
   email: string;
   pass: string;
   createdAt: string;
+  hq?: string;
 }
 const AUTH_USERS_KEY = "nutrova-optionB-users-v1";
 const AUTH_SESSION_KEY = "nutrova-optionB-session-v1";
@@ -479,44 +482,86 @@ const fmtTime = (t: string) => {
    localStorage is only a fast offline cache. Writes are debounced so typing stays smooth. */
 interface SyncCtx {
   remote: Record<string, unknown> | null;
+  remoteOwnerKey: string;
+  ownerKey: string;
+  onlineOwner: boolean;
   canSave: boolean;
   push: (key: string, value: unknown) => void;
 }
 const STORE_KEYS = ["nutrova-bio-v1", "nutrova-doctors-v3", "nutrova-patches-v2", "nutrova-reminders-v1", "nutrova-payments-v3"];
 
-function useSynced<T>(key: string, seed: () => T, sync: SyncCtx, norm?: (v: T) => T) {
-  const [value, setValue] = useState<T>(() => {
+function useSynced<T>(
+  key: string,
+  seed: () => T,
+  sync: SyncCtx,
+  norm?: (v: T) => T,
+  emptyForNewAccount?: () => T,
+) {
+  // Keep each account's offline cache separate as well as its RLS-protected cloud rows.
+  const localKey = sync.ownerKey ? `${key}::${sync.ownerKey}` : key;
+  const loadLocal = (fallback: T): T => {
     try {
-      const raw = localStorage.getItem(key);
+      const raw = localStorage.getItem(localKey);
       if (raw) {
-        const v = JSON.parse(raw) as T;
-        return norm ? norm(v) : v;
+        const parsed = JSON.parse(raw) as T;
+        return norm ? norm(parsed) : parsed;
+      }
+      // Older versions used one unscoped cache. Only migrate it into the
+      // creator's account, never into a teammate's newly created account.
+      const creatorKeys = [
+        `cloud:${APP_OWNER.email.toLowerCase()}`,
+        `local:${APP_OWNER.email.toLowerCase()}`,
+      ];
+      if (creatorKeys.includes(sync.ownerKey.toLowerCase())) {
+        const legacy = localStorage.getItem(key);
+        if (legacy) {
+          const parsed = JSON.parse(legacy) as T;
+          return norm ? norm(parsed) : parsed;
+        }
       }
     } catch {
       /* ignore */
     }
-    return seed();
+    return fallback;
+  };
+  const [value, setValue] = useState<T>(() => {
+    const fallback = sync.ownerKey && emptyForNewAccount ? emptyForNewAccount() : seed();
+    return loadLocal(fallback);
   });
   const ref = useRef(sync);
   ref.current = sync;
-  useEffect(() => {
-    if (sync.remote && key in sync.remote) {
+  const ownerRef = useRef(sync.ownerKey);
+  useLayoutEffect(() => {
+    if (ownerRef.current === sync.ownerKey) return;
+    ownerRef.current = sync.ownerKey;
+    const fallback = emptyForNewAccount ? emptyForNewAccount() : seed();
+    setValue(loadLocal(fallback));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localKey, sync.ownerKey]);
+  useLayoutEffect(() => {
+    // Never hydrate from the previous user's map while a new account is loading.
+    if (!sync.ownerKey || sync.remoteOwnerKey !== sync.ownerKey || !sync.remote) return;
+    if (Object.prototype.hasOwnProperty.call(sync.remote, key)) {
       const v = sync.remote[key] as T;
       setValue(norm ? norm(v) : v);
+    } else {
+      // An account with no row yet starts with its own profile/workspace, never
+      // whatever account happened to use this browser before it.
+      setValue(emptyForNewAccount ? emptyForNewAccount() : seed());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync.remote]);
+  }, [sync.remote, sync.remoteOwnerKey, sync.ownerKey]);
   useEffect(() => {
     const t = window.setTimeout(() => {
       try {
-        localStorage.setItem(key, JSON.stringify(value));
+        localStorage.setItem(localKey, JSON.stringify(value));
       } catch {
         /* ignore */
       }
       if (ref.current.canSave) ref.current.push(key, value);
     }, 250);
     return () => window.clearTimeout(t);
-  }, [key, value, sync.canSave]);
+  }, [key, localKey, value, sync.canSave]);
   return [value, setValue] as const;
 }
 
@@ -603,7 +648,12 @@ const seedBio = (): Bio => ({
 });
 
 /* App creator — highlighted on the login screen */
-const APP_OWNER = { name: "M Divakar Reddy", role: "Business Development Manager", hq: "Bangalore 2" };
+const APP_OWNER = {
+  name: "M Divakar Reddy",
+  role: "Business Development Manager",
+  hq: "Bangalore 2",
+  email: "divakar.reddy@nutrova.com",
+};
 
 /* Project-wide rename of the old role title to "Business Development Manager" */
 const renameRole = (s: string) =>
@@ -925,6 +975,7 @@ export default function App() {
   const [showLoginPass, setShowLoginPass] = useState(false);
   const [signupName, setSignupName] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
+  const [signupHq, setSignupHq] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
   const [signupConfirm, setSignupConfirm] = useState("");
   const [showSignupPass, setShowSignupPass] = useState(false);
@@ -939,6 +990,7 @@ export default function App() {
   const online = !!cfg;
   const [session, setSession] = useState<BackendSession | null>(() => loadSession());
   const [remote, setRemote] = useState<Record<string, unknown> | null>(null);
+  const [remoteOwnerKey, setRemoteOwnerKey] = useState("");
   const [syncState, setSyncState] = useState<"idle" | "loading" | "synced" | "error">("idle");
   const [syncError, setSyncError] = useState("");
   const [retryTick, setRetryTick] = useState(0);
@@ -954,19 +1006,66 @@ export default function App() {
   const [pwBusy, setPwBusy] = useState(false);
   const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  const signedIn = online ? !!session : !!sessionEmail;
+  const currentEmail = online ? session?.email || "" : sessionEmail;
+  const dataOwnerKey = currentEmail
+    ? `${online ? "cloud" : "local"}:${currentEmail.trim().toLowerCase()}`
+    : "";
+  const pendingAccountProfileRef = useRef<Bio | null>(null);
+  const accountDisplayName = online
+    ? session?.name || currentEmail.split("@")[0] || ""
+    : users.find((u) => u.email.toLowerCase() === currentEmail.toLowerCase())?.name || currentEmail.split("@")[0] || "";
+  const accountHq = online
+    ? session?.hq || ""
+    : users.find((u) => u.email.toLowerCase() === currentEmail.toLowerCase())?.hq || "";
+  const emptyProfileForAccount = (): Bio => {
+    const pending = pendingAccountProfileRef.current;
+    if (pending && pending.email.toLowerCase() === currentEmail.toLowerCase()) return { ...pending };
+    return ({
+    name: accountDisplayName,
+    role: APP_OWNER.role,
+    city: "",
+    state: "",
+    hq: accountHq,
+    phone: "",
+    email: currentEmail,
+    rev: BIO_REV,
+    });
+  };
+
+  /* Supabase can finish recovery before React reads the returned URL. Always
+     give PASSWORD_RECOVERY priority over an existing saved sign-in session. */
+  useEffect(() => {
+    if (!cfg) return;
+    return listenForPasswordRecovery(cfg, (s) => {
+      recoveryExchangeTried.current = true;
+      setRecoveryDismissed(false);
+      setRecoverySession(s);
+      setRecoveryTokens(null);
+      setRecoveryExchanging(false);
+      clearUrlAuthParams();
+    });
+  }, [cfg]);
+
   useEffect(() => {
     if (!cfg || !session) {
       setRemote(null);
+      setRemoteOwnerKey("");
       setSyncState("idle");
       return;
     }
+    const requestOwner = `cloud:${(session.email || "").trim().toLowerCase()}`;
     let cancelled = false;
+    // A previous account's map must never hydrate the newly signed-in account.
+    setRemote(null);
+    setRemoteOwnerKey("");
     setSyncState("loading");
     setSyncError("");
     fetchAll(cfg)
       .then((map) => {
         if (cancelled) return;
         setRemote(map);
+        setRemoteOwnerKey(requestOwner);
         setSyncState("synced");
         setLastSync(Date.now());
       })
@@ -983,8 +1082,11 @@ export default function App() {
 
   const syncCtx = useMemo<SyncCtx>(
     () => ({
-      remote,
-      canSave: online && !!session && remote !== null,
+      remote: remoteOwnerKey === dataOwnerKey ? remote : null,
+      remoteOwnerKey,
+      ownerKey: dataOwnerKey,
+      onlineOwner: online && !!session,
+      canSave: online && !!session && remoteOwnerKey === dataOwnerKey && remote !== null,
       push: (key, value) => {
         if (!cfg) return;
         saveKey(cfg, key, value)
@@ -998,17 +1100,34 @@ export default function App() {
           });
       },
     }),
-    [remote, online, session, cfg]
+    [remote, remoteOwnerKey, dataOwnerKey, online, session, cfg]
   );
 
-  const [bio, setBio] = useSynced<Bio>("nutrova-bio-v1", seedBio, syncCtx, normBio);
-  const [doctors, setDoctors] = useSynced<Doctor[]>("nutrova-doctors-v3", seedDoctors, syncCtx, normDoctors);
-  const [patches, setPatches] = useSynced<Patch[]>("nutrova-patches-v2", seedPatches, syncCtx);
-  const [reminders, setReminders] = useSynced<Reminder[]>("nutrova-reminders-v1", seedReminders, syncCtx);
-  const [payments, setPayments] = useSynced<Payment[]>("nutrova-payments-v3", seedPayments, syncCtx, (arr) => (Array.isArray(arr) ? arr.map(normPay) : []));
+  const [bio, setBio] = useSynced<Bio>(
+    "nutrova-bio-v1", seedBio, syncCtx, normBio, emptyProfileForAccount
+  );
+  const [doctors, setDoctors] = useSynced<Doctor[]>(
+    "nutrova-doctors-v3", seedDoctors, syncCtx, normDoctors, () => []
+  );
+  const [patches, setPatches] = useSynced<Patch[]>(
+    "nutrova-patches-v2", seedPatches, syncCtx, undefined, () => []
+  );
+  const [reminders, setReminders] = useSynced<Reminder[]>(
+    "nutrova-reminders-v1", seedReminders, syncCtx, undefined, () => []
+  );
+  const [payments, setPayments] = useSynced<Payment[]>(
+    "nutrova-payments-v3", seedPayments, syncCtx,
+    (arr) => (Array.isArray(arr) ? arr.map(normPay) : []),
+    () => []
+  );
 
-  const signedIn = online ? !!session : !!sessionEmail;
-  const currentEmail = online ? session?.email || "" : sessionEmail;
+  // Consume the sign-up profile after that account's own cloud workspace loads.
+  useEffect(() => {
+    const pending = pendingAccountProfileRef.current;
+    if (pending && remote && remoteOwnerKey === dataOwnerKey && pending.email.toLowerCase() === currentEmail.toLowerCase()) {
+      pendingAccountProfileRef.current = null;
+    }
+  }, [remote, remoteOwnerKey, dataOwnerKey, currentEmail]);
 
   const [bioDraft, setBioDraft] = useState<Bio>(bio);
   useEffect(() => setBioDraft(bio), [currentEmail, bio]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1183,7 +1302,6 @@ export default function App() {
     if (!found) return setAuthError("Account not found — please Create account first");
     if (found.pass !== loginPassword) return setAuthError("Wrong password — try again");
     persistSession(found.email);
-    setBio((b) => ({ ...b, email: found.email }));
     setLoginPassword("");
     setShowLoginPass(false);
     showToast(`Welcome back${firstName(found.name) ? ", " + firstName(found.name) : ""} — stays signed in`);
@@ -1191,13 +1309,24 @@ export default function App() {
   const handleSignupLocal = () => {
     const name = signupName.trim();
     const email = signupEmail.trim().toLowerCase();
-    const nu: AppUser = { name, email, pass: signupPassword, createdAt: new Date().toISOString() };
+    const hq = signupHq.trim();
+    const nu: AppUser = { name, email, pass: signupPassword, createdAt: new Date().toISOString(), hq };
     setUsers((prev) => [...prev, nu]);
+    pendingAccountProfileRef.current = {
+      ...seedBio(),
+      name,
+      role: APP_OWNER.role,
+      city: "",
+      state: "",
+      hq,
+      email,
+      rev: BIO_REV,
+    };
     persistSession(email);
-    setBio((b) => normBio({ ...b, email, name }));
     setSignupPassword(""); setSignupConfirm("");
+    setSignupHq("");
     setShowSignupPass(false); setShowSignupConfirm(false);
-    showToast(`Account created — welcome, ${firstName(name)}!`);
+    showToast(`Account created — welcome, ${firstName(name)}! Your private workspace is ready.`);
   };
   const handleLogin = async () => {
     if (!online || !cfg) return handleLoginLocal();
@@ -1221,6 +1350,7 @@ export default function App() {
   const handleSignup = async () => {
     const name = signupName.trim();
     const email = signupEmail.trim().toLowerCase();
+    const hq = signupHq.trim();
     setAuthError(""); setAuthInfo("");
     if (!name) return setAuthError("Please enter full name");
     if (!email || !email.includes("@")) return setAuthError("Please enter valid work email");
@@ -1232,12 +1362,21 @@ export default function App() {
     }
     setAuthBusy(true);
     try {
-      const r = await signUpRemote(cfg, name, email, signupPassword);
+      const r = await signUpRemote(cfg, name, email, signupPassword, hq);
       if (r.session) {
-        setBio((b) => normBio({ ...b, email, name }));
+        pendingAccountProfileRef.current = {
+          ...seedBio(),
+          name,
+          role: APP_OWNER.role,
+          city: "",
+          state: "",
+          hq,
+          email,
+          rev: BIO_REV,
+        };
         setSession(r.session);
-        setSignupPassword(""); setSignupConfirm("");
-        showToast(`Account created online — welcome, ${firstName(name)}!`);
+        setSignupPassword(""); setSignupConfirm(""); setSignupHq("");
+        showToast(`Account created online — welcome, ${firstName(name)}! Your private workspace is ready.`);
       } else {
         setAuthInfo("Account created. Open the confirmation email we sent, then come back and Sign in.");
         setAuthMode("login");
@@ -1256,9 +1395,14 @@ export default function App() {
     if (!online || !cfg) return setAuthError("Password reset needs internet — the online store is not connected");
     setAuthBusy(true);
     try {
+      // Leave a clean auth state so a previous account session cannot bypass reset.
+      persistSession("");
+      setSession(null);
+      setRemote(null);
+      try { await signOutRemote(cfg); } catch { /* reset request can still proceed */ }
       await requestPasswordReset(cfg, email);
       setForgotSent(true);
-      setAuthInfo(`Reset link sent to ${email}. Open the email on this phone, tap the link, then set a new password.`);
+      setAuthInfo(`Reset link sent to ${email}. Open the newest email link on this phone to create a new password. You'll stay on the reset screen until you finish.`);
     } catch (e) {
       setAuthError(e instanceof Error ? e.message : "Could not send reset link");
     } finally {
@@ -1272,11 +1416,11 @@ export default function App() {
     if (!cfg || (!recoveryTokens && !recoverySession)) return setAuthError("Reset session missing — please request a new link");
     setRecovering(true);
     try {
-      /* hash-token links adopt the session now; code/token links were already exchanged on arrival */
-      const s = recoveryTokens ? await adoptRecoverySession(cfg, recoveryTokens) : recoverySession!;
+      /* Prefer the session Supabase recovered from the email; fall back to adopting legacy hash tokens. */
+      const s = recoverySession || (recoveryTokens ? await adoptRecoverySession(cfg, recoveryTokens) : null);
+      if (!s) throw new Error("Reset session is missing — request a new reset link and open it on this device.");
       await updatePasswordRemote(cfg, recoveryPw);
       setSession(s);
-      setBio((b) => ({ ...b, email: s.email || b.email, name: s.name || b.name }));
       setRecoveryTokens(null);
       setRecoverySession(null);
       clearUrlAuthParams();
@@ -1509,7 +1653,7 @@ export default function App() {
   const saveBio = () => {
     if (!bioDraft.name.trim()) return showToast("Please enter employee name", "info");
     setBio({ ...bioDraft });
-    showToast("Bio saved — banner & footer updated");
+      showToast("Your account bio was saved");
   };
 
   const openDoctorModal = (editing: boolean, draft: Doctor) => {
@@ -1815,7 +1959,7 @@ export default function App() {
     showToast(`Downloaded ${callsTodayList.length} calls as CSV`);
   };
 
-  /* Exchange ?code= / ?token_hash= reset links once on arrival; surface link errors on sign-in */
+  /* Keep the reset flow in front of the app, even if Supabase leaves an old session cached. */
   useEffect(() => {
     if (!urlSignal || !cfg || recoveryExchangeTried.current) return;
     if (urlSignal.kind === "hash-tokens") return; // handled synchronously, no exchange needed
@@ -1831,14 +1975,23 @@ export default function App() {
     }
     recoveryExchangeTried.current = true;
     setRecoveryExchanging(true);
-    (urlSignal.kind === "code"
-      ? exchangeRecoveryCode(cfg, urlSignal.code)
-      : verifyRecoveryTokenHash(cfg, urlSignal.token_hash)
-    )
+    const exchange = urlSignal.kind === "code"
+      // Supabase JS auto-detects and exchanges PKCE codes on page load. Read the
+      // resulting session instead of exchanging the one-time code a second time.
+      ? getRecoverySession(cfg).then((s) => {
+          if (!s) throw new Error("Supabase did not establish a recovery session. Open the newest reset email link on this same phone/browser.");
+          return s;
+        })
+      : urlSignal.kind === "token-hash"
+        ? verifyRecoveryTokenHash(cfg, urlSignal.token_hash)
+        : getRecoverySession(cfg).then((s) => {
+            if (!s) throw new Error("The reset email returned to the app without a recovery session. Request a new link and open the newest email on this same phone/browser.");
+            return s;
+          });
+    exchange
       .then((s) => setRecoverySession(s))
       .catch((e) => {
         setAuthError(e instanceof Error ? e.message : "Reset link expired — please request a new one");
-        clearUrlAuthParams();
       })
       .finally(() => setRecoveryExchanging(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1879,6 +2032,9 @@ export default function App() {
               </ol>
               <button onClick={cancelRecovery} className="w-full rounded-2xl bg-emerald-700 py-3 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800">
                 Return to sign in
+              </button>
+              <button onClick={() => { cancelRecovery(); setAuthMode("signup"); setAuthError(""); setAuthInfo(""); }} className="w-full text-center text-xs font-bold text-emerald-700 underline-offset-2 hover:underline">
+                Create a new account instead
               </button>
             </div>
           </div>
@@ -1933,6 +2089,9 @@ export default function App() {
               </button>
               <button onClick={cancelRecovery} className="w-full text-center text-xs font-bold text-slate-400 underline-offset-2 hover:text-slate-600 hover:underline">
                 Cancel — back to sign in
+              </button>
+              <button onClick={() => { cancelRecovery(); setAuthMode("signup"); setAuthError(""); setAuthInfo(""); }} className="w-full text-center text-xs font-bold text-emerald-700 underline-offset-2 hover:underline">
+                Create a fresh account instead
               </button>
             </div>
             )}
@@ -2028,6 +2187,14 @@ export default function App() {
                   <Mail className="h-4 w-4 shrink-0 text-slate-400" />
                   <input value={signupEmail} onChange={(e) => setSignupEmail(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" autoComplete="email" />
                 </div>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Your HQ / territory</label>
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                  <MapPin className="h-4 w-4 shrink-0 text-slate-400" />
+                  <input value={signupHq} onChange={(e) => setSignupHq(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="e.g. Bangalore 2" autoComplete="organization-title" />
+                </div>
+                <p className="mt-1 text-[11px] font-medium text-slate-400">This is saved in your account profile. You can change it later in Bio.</p>
               </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
@@ -2143,8 +2310,8 @@ export default function App() {
                 </h1>
                 {/* tagline — always fully visible, wraps to 2 lines on mobile instead of cutting */}
                 <p className="text-emerald-100/90 mt-1 text-xs leading-snug sm:text-sm">
-                  Created by <span className="font-bold text-white underline decoration-emerald-300/60 underline-offset-2">{bio.name || "—"}</span>
-                  <span className="mx-1.5 text-emerald-300/60">·</span><span className="whitespace-nowrap">{bio.role || "Business Development Manager"}</span>
+                  Created by <span className="font-bold text-white underline decoration-emerald-300/60 underline-offset-2">{APP_OWNER.name}</span>
+                  <span className="mx-1.5 text-emerald-300/60">·</span><span className="whitespace-nowrap">{APP_OWNER.role}</span>
                   <span className="mx-1.5 text-emerald-300/60">·</span><span className="font-bold text-white">Nutrova</span>
                 </p>
               </div>
@@ -2152,7 +2319,7 @@ export default function App() {
             <div className="flex shrink-0 items-start gap-2 pt-0.5 sm:gap-2">
               <span className="hidden items-center gap-2 pt-2 text-sm font-medium text-emerald-100/90 xl:flex">
                 <Mail className="h-4 w-4 shrink-0 text-emerald-300" />
-                <span className="max-w-[180px] truncate">{sessionEmail || bio.email || "—"}</span>
+                <span className="max-w-[180px] truncate">{APP_OWNER.email}</span>
               </span>
               <button onClick={() => setShareOpen(true)} title="Share this app with others" className="flex shrink-0 items-center gap-1.5 rounded-full bg-amber-400 font-extrabold text-amber-950 shadow transition hover:bg-amber-300 sm:gap-2 sm:text-sm px-3.5 py-2 text-xs sm:px-4 sm:py-2.5 sm:text-sm">
                 <Share2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> <span className="hidden sm:inline">Share</span>
@@ -2423,7 +2590,7 @@ export default function App() {
         {activeTab === "bio" && (
         <section id="bio" key="tab-bio" className="anim-fade-up">
           <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Bio</h2>
-          <p className="mt-1 text-sm font-medium text-slate-500">{isAndroidPhone ? "Profile · in banner + footer" : "Short employee profile · shown in banner and footer"}</p>
+          <p className="mt-1 text-sm font-medium text-slate-500">Your Bio and HQ belong to this account. Its doctors, areas, reminders and purchase orders are kept separate from other accounts.</p>
 
           <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-[360px_1fr]">
             {/* short bio ID card */}
@@ -2480,11 +2647,11 @@ export default function App() {
             <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="border-l-4 border-emerald-500 p-5 sm:p-6">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="text-lg font-extrabold tracking-tight text-slate-900">Employee Bio Data</h3>
-                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-extrabold text-emerald-700 ring-1 ring-emerald-100">Auto-updates banner + footer</span>
+                  <h3 className="text-lg font-extrabold tracking-tight text-slate-900">Your Bio Data</h3>
+                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-extrabold text-emerald-700 ring-1 ring-emerald-100">Private to your account</span>
                 </div>
                 <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <BioInput label="Full name" value={bioDraft.name} onChange={(v) => setBioDraft({ ...bioDraft, name: v })} placeholder="Divakar Reddy" />
+                  <BioInput label="Full name" value={bioDraft.name} onChange={(v) => setBioDraft({ ...bioDraft, name: v })} placeholder="Your full name" />
                   <BioInput label="Role" value={bioDraft.role} onChange={(v) => setBioDraft({ ...bioDraft, role: v })} placeholder="Business Development Manager" />
                   <BioInput label="City" value={bioDraft.city} onChange={(v) => setBioDraft({ ...bioDraft, city: v })} placeholder="Bangalore" />
                   <BioInput label="State" value={bioDraft.state} onChange={(v) => setBioDraft({ ...bioDraft, state: v })} placeholder="Karnataka" />
@@ -2495,7 +2662,7 @@ export default function App() {
                   </div>
                 </div>
                 <button onClick={saveBio} className="mt-4 w-full rounded-2xl bg-emerald-700 py-3 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99] sm:w-auto sm:px-10">
-                  Save Bio
+                  Save My Bio
                 </button>
               </div>
             </div>
@@ -3088,6 +3255,15 @@ export default function App() {
                   </button>
                 </div>
 
+                <div className="rounded-2xl border border-sky-100 bg-sky-50/70 p-3.5">
+                  <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-wider text-sky-800">
+                    <Lock className="h-3.5 w-3.5" /> Private workspace
+                  </p>
+                  <p className="mt-1 text-xs font-medium leading-relaxed text-sky-900/75">
+                    Doctors, area patches, reminders, purchase orders and HQ are saved only to {currentEmail || "this account"}. New accounts get their own empty doctor list. Set or update your HQ in Bio.
+                  </p>
+                </div>
+
                 {/* change password */}
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
                   <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest text-slate-500"><Lock className="h-3.5 w-3.5" /> Change password</p>
@@ -3227,7 +3403,7 @@ export default function App() {
         <div className="mx-auto grid max-w-7xl grid-cols-1 gap-6 px-5 py-8 sm:px-8 md:grid-cols-3">
           <div>
             <p className="flex items-center gap-2 text-base font-extrabold"><Stethoscope className="h-5 w-5 text-emerald-300" /> Nutrova Doctor Tracker</p>
-            <p className="mt-1.5 text-sm text-emerald-100/70">Field companion for {bio.name || "Business Development Manager"} · {bio.role} · {bio.city}, {bio.state}</p>
+            <p className="mt-1.5 text-sm text-emerald-100/70">App created by {APP_OWNER.name} · {APP_OWNER.role} · {APP_OWNER.hq} HQ</p>
           </div>
           <div className="text-sm">
             <p className="text-xs font-extrabold uppercase tracking-widest text-emerald-300/70">Territory summary</p>
@@ -3235,11 +3411,11 @@ export default function App() {
           </div>
           <div className="text-sm md:text-right">
             <p className="text-xs font-extrabold uppercase tracking-widest text-emerald-300/70">Contact</p>
-            <p className="mt-1.5 font-medium text-emerald-50">{bio.phone || "Phone not set"} · <a className="underline underline-offset-2 hover:text-emerald-200" href={`mailto:${bio.email}`}>{bio.email}</a></p>
+            <p className="mt-1.5 font-medium text-emerald-50"><a className="underline underline-offset-2 hover:text-emerald-200" href={`mailto:${APP_OWNER.email}`}>{APP_OWNER.email}</a></p>
           </div>
         </div>
         <div className="border-t border-white/10 py-4 text-center text-xs font-medium text-emerald-100/50">
-          Crafted for Nutrova · {bio.city} HQ · All data stays on this device
+          Crafted for Nutrova · {APP_OWNER.hq} HQ · Online account data
         </div>
       </footer>
 

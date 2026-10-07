@@ -14,11 +14,13 @@ export interface BackendSession {
   expires_at: number; // epoch seconds
   email: string;
   name: string;
+  hq?: string;
 }
 
 const CFG_KEY = "nutrova-backend-cfg-v1";
 const SESSION_KEY = "nutrova-backend-session-v1";
 const SB_STORAGE_PREFIX = "sb-";
+const RECOVERY_INTENT_KEY = "nutrova-password-reset-pending-v1";
 
 /* Nutrova Supabase project. The publishable key is public by design — it is meant to
    ship inside the app. Data stays private because every row is protected by RLS. */
@@ -80,7 +82,8 @@ function clientFor(url: string, key: string): SupabaseClient {
   let c = clients.get(id);
   if (!c) {
     c = createClient(url, key, {
-      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+      // Let Supabase process reset callbacks on arrival and emit PASSWORD_RECOVERY.
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
     });
     clients.set(id, c);
   }
@@ -110,7 +113,7 @@ async function ready(c: SupabaseClient): Promise<Ready> {
 
 function toSession(
   s: { access_token: string; refresh_token?: string; expires_at?: number; expires_in?: number },
-  user?: { email?: string; user_metadata?: { name?: string } },
+  user?: { email?: string; user_metadata?: { name?: string; hq?: string } },
   fallbackName = ""
 ): BackendSession {
   const out: BackendSession = {
@@ -119,6 +122,7 @@ function toSession(
     expires_at: Number(s.expires_at) || Math.floor(Date.now() / 1000) + Number(s.expires_in || 3600),
     email: user?.email || "",
     name: user?.user_metadata?.name || fallbackName || "",
+    hq: user?.user_metadata?.hq || "",
   };
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify(out));
@@ -193,13 +197,14 @@ export async function signUpRemote(
   cfg: BackendConfig,
   name: string,
   email: string,
-  password: string
+  password: string,
+  hq = ""
 ): Promise<{ session: BackendSession | null; needsConfirm: boolean }> {
   let last = "";
   for (const key of keyCandidates(cfg.key)) {
     const c = clientFor(cfg.url, key);
     try {
-      const { data, error } = await c.auth.signUp({ email, password, options: { data: { name } } });
+      const { data, error } = await c.auth.signUp({ email, password, options: { data: { name, hq } } });
       if (!error) {
         if (data.session) return { session: toSession(data.session, data.user ?? undefined, name), needsConfirm: false };
         return { session: null, needsConfirm: true };
@@ -236,7 +241,10 @@ export async function signInRemote(cfg: BackendConfig, email: string, password: 
 export async function requestPasswordReset(cfg: BackendConfig, email: string): Promise<void> {
   let redirectTo: string | undefined;
   try {
-    redirectTo = window.location.origin + window.location.pathname;
+    const url = new URL(window.location.origin + window.location.pathname);
+    // Marker keeps the app on the reset flow even if an old Supabase session exists.
+    url.searchParams.set("auth", "recovery");
+    redirectTo = url.toString();
   } catch {
     redirectTo = undefined;
   }
@@ -244,11 +252,16 @@ export async function requestPasswordReset(cfg: BackendConfig, email: string): P
   for (const key of keyCandidates(cfg.key)) {
     const c = clientFor(cfg.url, key);
     try {
+      // Preserve the reset intent across the Supabase email redirect. This prevents
+      // an older cached login session from skipping straight into the app.
+      try { localStorage.setItem(RECOVERY_INTENT_KEY, email.toLowerCase()); } catch { /* ignore */ }
       const { error } = await c.auth.resetPasswordForEmail(email, redirectTo ? { redirectTo } : undefined);
       if (!error) return;
+      try { localStorage.removeItem(RECOVERY_INTENT_KEY); } catch { /* ignore */ }
       last = error.message;
       if (!isKeyError(last)) break;
     } catch (e) {
+      try { localStorage.removeItem(RECOVERY_INTENT_KEY); } catch { /* ignore */ }
       last = e instanceof Error ? e.message : "Could not send reset link";
       if (!isKeyError(last)) break;
     }
@@ -316,6 +329,7 @@ export type UrlRecoverySignal =
   | { kind: "hash-tokens"; access_token: string; refresh_token: string }
   | { kind: "code"; code: string }
   | { kind: "token-hash"; token_hash: string }
+  | { kind: "marker" }
   | { kind: "error"; message: string };
 
 export function getUrlRecoverySignal(): UrlRecoverySignal | null {
@@ -330,6 +344,7 @@ export function getUrlRecoverySignal(): UrlRecoverySignal | null {
       if (at && rt) return { kind: "hash-tokens", access_token: at, refresh_token: rt };
       const hc = hp.get("code") || "";
       if (hc) return { kind: "code", code: hc };
+      if (hp.get("type") === "recovery" || hp.get("auth") === "recovery" || hp.get("auth") === "reset") return { kind: "marker" };
     }
     const q = window.location.search || "";
     if (q) {
@@ -340,7 +355,10 @@ export function getUrlRecoverySignal(): UrlRecoverySignal | null {
       if (code) return { kind: "code", code };
       const th = qp.get("token_hash") || "";
       if (th) return { kind: "token-hash", token_hash: th };
+      if (qp.get("type") === "recovery" || qp.get("auth") === "recovery" || qp.get("auth") === "reset") return { kind: "marker" };
     }
+    // Same-device recovery marker: handles Supabase redirects that strip auth params.
+    if (localStorage.getItem(RECOVERY_INTENT_KEY)) return { kind: "marker" };
   } catch {
     /* ignore */
   }
@@ -354,6 +372,7 @@ export function clearUrlAuthParams() {
   } catch {
     /* ignore */
   }
+  try { localStorage.removeItem(RECOVERY_INTENT_KEY); } catch { /* ignore */ }
 }
 
 /* Exchange a ?code= recovery link for a session (must open on the same phone/browser that requested it) */
@@ -399,6 +418,52 @@ export async function verifyRecoveryTokenHash(cfg: BackendConfig, token_hash: st
   }
   if (/expired|invalid|used/i.test(last)) throw new Error("Reset link expired — please request a new one");
   throw new Error(finalError(last));
+}
+
+/* Some email templates complete the Supabase verify step before redirecting and
+   return to the app with a recovery session already established but no URL token. */
+export async function getRecoverySession(cfg: BackendConfig): Promise<BackendSession | null> {
+  let last = "";
+  for (const key of keyCandidates(cfg.key)) {
+    const c = clientFor(cfg.url, key);
+    try {
+      const { data, error } = await c.auth.getSession();
+      if (!error && data.session) return toSession(data.session, data.session.user ?? undefined);
+      if (error) {
+        last = error.message;
+        if (!isKeyError(last)) break;
+      }
+    } catch (e) {
+      last = e instanceof Error ? e.message : "Could not read recovery session";
+      if (!isKeyError(last)) break;
+    }
+  }
+  if (last && isKeyError(last)) throw new Error(finalError(last));
+  return null;
+}
+
+/* React to Supabase's recovery event as an additional safety net for email links. */
+export function listenForPasswordRecovery(
+  cfg: BackendConfig,
+  onRecovery: (session: BackendSession) => void
+): () => void {
+  const c = clientFor(cfg.url, cfg.key);
+  const { data } = c.auth.onAuthStateChange((event, session) => {
+    if (event === "PASSWORD_RECOVERY" && session) {
+      onRecovery(toSession(session, session.user ?? undefined));
+    }
+  });
+  return () => data.subscription.unsubscribe();
+}
+
+/* Clear any old SDK session before beginning a password reset. */
+export async function signOutRemote(cfg: BackendConfig): Promise<void> {
+  for (const key of keyCandidates(cfg.key)) {
+    const c = clientFor(cfg.url, key);
+    const { error } = await c.auth.signOut({ scope: "local" });
+    if (!error || !isKeyError(error.message)) break;
+  }
+  clearSession();
 }
 
 /* Change the signed-in user's password on the server */
