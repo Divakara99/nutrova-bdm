@@ -486,8 +486,18 @@ const fmtTime = (t: string) => {
   return `${hr}:${String(m).padStart(2, "0")} ${am}`;
 };
 
-/* Online-synced state: the backend (online store) is the source of truth when connected;
-   localStorage is only a fast offline cache. Writes are debounced so typing stays smooth. */
+/* Online-synced state.
+
+   CLOUD IS THE ONLY SOURCE OF TRUTH for a signed-in account.
+   Previously each device also kept a localStorage copy and seeded from it on
+   open. That caused deleted records to reappear: phone B still had the old
+   array cached, showed it, and on the next edit pushed that stale array back
+   to Supabase — resurrecting doctors deleted on phone A.
+
+   Now, when signed in online: we never read and never write the device cache
+   for data keys, and any old cached copy is purged. Writes are debounced so
+   typing stays smooth. (A local-only account with no cloud session still uses
+   localStorage, otherwise it would have nowhere to store anything.) */
 interface SyncCtx {
   remote: Record<string, unknown> | null;
   remoteOwnerKey: string;
@@ -534,6 +544,9 @@ function useSynced<T>(
   };
   const [value, setValue] = useState<T>(() => {
     const fallback = sync.ownerKey && emptyForNewAccount ? emptyForNewAccount() : seed();
+    // Cloud account: start empty and wait for the server copy. Seeding from
+    // this device is what made deleted records come back.
+    if (sync.onlineOwner) return fallback;
     return loadLocal(fallback);
   });
   const ref = useRef(sync);
@@ -543,9 +556,9 @@ function useSynced<T>(
     if (ownerRef.current === sync.ownerKey) return;
     ownerRef.current = sync.ownerKey;
     const fallback = emptyForNewAccount ? emptyForNewAccount() : seed();
-    setValue(loadLocal(fallback));
+    setValue(sync.onlineOwner ? fallback : loadLocal(fallback));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [localKey, sync.ownerKey]);
+  }, [localKey, sync.ownerKey, sync.onlineOwner]);
   useLayoutEffect(() => {
     // Never hydrate from the previous user's map while a new account is loading.
     if (!sync.ownerKey || sync.remoteOwnerKey !== sync.ownerKey || !sync.remote) return;
@@ -561,15 +574,26 @@ function useSynced<T>(
   }, [sync.remote, sync.remoteOwnerKey, sync.ownerKey]);
   useEffect(() => {
     const t = window.setTimeout(() => {
-      try {
-        localStorage.setItem(localKey, JSON.stringify(value));
-      } catch {
-        /* ignore */
+      if (ref.current.onlineOwner) {
+        // Cloud-only: never cache data on the device, and clear anything an
+        // older build left behind so it can never be read again.
+        try {
+          localStorage.removeItem(localKey);
+          localStorage.removeItem(key);
+        } catch {
+          /* ignore */
+        }
+      } else {
+        try {
+          localStorage.setItem(localKey, JSON.stringify(value));
+        } catch {
+          /* ignore */
+        }
       }
       if (ref.current.canSave) ref.current.push(key, value);
     }, 250);
     return () => window.clearTimeout(t);
-  }, [key, localKey, value, sync.canSave]);
+  }, [key, localKey, value, sync.canSave, sync.onlineOwner]);
   return [value, setValue] as const;
 }
 
@@ -1516,6 +1540,61 @@ export default function App() {
   const [monWeek, setMonWeek] = useState("1st");
   const [monDay, setMonDay] = useState("Tuesday");
   const [confirmDelete, setConfirmDelete] = useState<{ open: boolean; title: string; label: string; detail: string; confirmText: string; onYes: () => void }>({ open: false, title: "", label: "", detail: "", confirmText: "", onYes: () => {} });
+
+  /* Pull fresh cloud data when the app regains focus, reconnects, or every 60s.
+     Without this a second phone keeps showing doctors deleted on the first one,
+     because the workspace was only fetched once at sign-in. This is a SOFT
+     refresh: it never blanks the screen, and it pauses while a modal is open
+     so it can't overwrite something you are editing. */
+  const modalOpenRef = useRef(false);
+  modalOpenRef.current =
+    doctorModal.open ||
+    reminderModal.open ||
+    paymentModal.open ||
+    patchModal ||
+    doctorImportOpen ||
+    confirmDelete.open;
+
+  useEffect(() => {
+    if (!cfg || !session) return;
+    const requestOwner = `cloud:${(session.email || "").trim().toLowerCase()}`;
+    let busy = false;
+    let last = Date.now();
+    const pull = async (force: boolean) => {
+      if (busy || modalOpenRef.current) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (!force && Date.now() - last < 15000) return;
+      busy = true;
+      try {
+        const map = await fetchAll(cfg);
+        setRemote(map);
+        setRemoteOwnerKey(requestOwner);
+        setSyncState("synced");
+        setLastSync(Date.now());
+        last = Date.now();
+      } catch {
+        /* offline or blocked — keep showing what we already have */
+      } finally {
+        busy = false;
+      }
+    };
+    const onFocus = () => void pull(false);
+    const onVis = () => {
+      if (document.visibilityState === "visible") void pull(false);
+    };
+    const onOnline = () => void pull(true);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("online", onOnline);
+    const iv = window.setInterval(() => void pull(false), 60000);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("online", onOnline);
+      window.clearInterval(iv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg, session?.email]);
 
   /* every delete goes through this confirmation — nothing deletes instantly */
   const closeConfirm = () => setConfirmDelete({ open: false, title: "", label: "", detail: "", confirmText: "", onYes: () => {} });
