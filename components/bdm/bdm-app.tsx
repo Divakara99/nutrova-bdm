@@ -378,26 +378,6 @@ const migrateProducts = (list: unknown): string[] => {
 };
 
 /* Patches have no colour option — single emerald style everywhere */
-/* ---------------- Doctor grade: A = 3 visits, B = 2, C = 1 (per month) ----------------
-   Grade is stored on the doctor when set, otherwise derived so existing data
-   works immediately: monthly call rules first, then priority. */
-type Grade = "A" | "B" | "C";
-const GRADE_VISITS: Record<Grade, number> = { A: 3, B: 2, C: 1 };
-const GRADE_STYLE: Record<Grade, string> = {
-  A: "border-emerald-200 bg-emerald-50 text-emerald-800",
-  B: "border-sky-200 bg-sky-50 text-sky-800",
-  C: "border-slate-200 bg-slate-100 text-slate-600",
-};
-function doctorGrade(d: Doctor): Grade {
-  const g = (d as Doctor & { grade?: string }).grade;
-  if (g === "A" || g === "B" || g === "C") return g;
-  const monthly = (d.monthlyCalls || []).length;
-  if (monthly >= 3) return "A";
-  if (monthly === 2) return "B";
-  if (monthly === 1) return "C";
-  return d.priority === "High" ? "A" : d.priority === "Low" ? "C" : "B";
-}
-
 function patchStyles(_color?: string) {
   void _color;
   return { dot: "bg-emerald-500", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", ring: "ring-emerald-200", soft: "bg-emerald-50" };
@@ -1209,19 +1189,25 @@ async function writeBriefingCache(b: MorningBriefing) {
   }
 }
 
+/* Service workers are DISABLED on purpose.
+   A caching worker repeatedly served stale HTML in place of hashed JS chunks
+   after a redeploy, which showed up as a blank / stuck screen. Instead of
+   registering one, we now actively remove any worker left on the device and
+   clear its caches. Reminder alarms run in-app and do not need a worker. */
 async function ensureServiceWorker(): Promise<boolean> {
   try {
     if (!("serviceWorker" in navigator)) return false;
-    const reg = await navigator.serviceWorker.register("sw.js");
+    const regs = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(regs.map((r) => r.unregister().catch(() => false)));
     try {
-      const ps = (reg as unknown as {
-        periodicSync?: { register: (tag: string, opts?: { minInterval?: number }) => Promise<void> };
-      }).periodicSync;
-      if (ps) await ps.register("morning-briefing", { minInterval: 60 * 60 * 1000 });
+      if (typeof caches !== "undefined") {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
     } catch {
-      /* periodic sync needs an installed PWA + permission; in-app alarm still works */
+      /* ignore */
     }
-    return true;
+    return false;
   } catch {
     return false;
   }
@@ -1476,10 +1462,11 @@ export default function App() {
   const [doctorModal, setDoctorModal] = useState<{ open: boolean; draft: Doctor; editing: boolean }>({ open: false, draft: emptyDoctor(), editing: false });
   const [doctorImportOpen, setDoctorImportOpen] = useState(false);
   /* Doctor cards: collapsed by default, tap to expand. Multi-select for bulk delete. */
-  const [gradeFilter, setGradeFilter] = useState<"All" | Grade>("All");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  /* Area filter row collapses to one line until expanded */
+  const [areaOpen, setAreaOpen] = useState(false);
   const toggleExpanded = (id: string) =>
     setExpandedIds((prev) => {
       const next = new Set(prev);
@@ -2131,7 +2118,6 @@ export default function App() {
       if (specFilter !== "All" && d.specialty !== specFilter) return false;
       if (productFilter !== "All" && !(d.focusProducts || []).includes(productFilter) && !(d.followProducts || []).includes(productFilter)) return false;
       if (apptFilter !== "All" && !(d.appointmentModes || []).includes(apptFilter)) return false;
-      if (gradeFilter !== "All" && doctorGrade(d) !== gradeFilter) return false;
       if (patchFilter === "none" && d.patchId) return false;
       if (patchFilter !== "all" && patchFilter !== "none" && d.patchId !== patchFilter) return false;
       if (callsTodayOnly && !doctorCallsOn(d, new Date())) return false;
@@ -2140,7 +2126,7 @@ export default function App() {
       return [d.name, d.specialty, d.area, d.city, d.clinic, d.phone, patchName, describeWeekly(d.callDays || []), (d.monthlyCalls || []).join(" "), (d.focusProducts || []).join(" "), (d.followProducts || []).join(" "), (d.appointmentModes || []).join(" "), d.appointmentContact || "", d.appointmentPhone || "", d.appointmentNote || ""].join(" ").toLowerCase().includes(q);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doctors, search, specFilter, productFilter, apptFilter, gradeFilter, patchFilter, callsTodayOnly, patches]);
+  }, [doctors, search, specFilter, productFilter, apptFilter, patchFilter, callsTodayOnly, patches]);
 
   const filteredReminders = useMemo(() => {
     const t = todayISO();
@@ -3303,54 +3289,69 @@ export default function App() {
           {/* patch filter bar */}
           <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-50/60 p-3 sm:p-4">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="flex items-center gap-1.5 px-1 text-xs font-extrabold uppercase tracking-widest text-slate-500"><Layers className="h-4 w-4 text-emerald-600" /> Area patches</span>
-              <button onClick={() => setPatchFilter("all")} className={`rounded-full px-3.5 py-1.5 text-xs font-extrabold transition ${patchFilter === "all" ? "bg-emerald-700 text-white shadow" : "bg-white text-slate-500 ring-1 ring-slate-200 hover:text-emerald-700"}`}>
-                All · {doctors.length}
+              {/* Collapsed header: tap to expand the area filter chips.
+                  "Manage patches" is the only action button here. */}
+              <button
+                onClick={() => setAreaOpen((v) => !v)}
+                aria-expanded={areaOpen}
+                className="flex items-center gap-1.5 rounded-full px-1 text-xs font-extrabold uppercase tracking-widest text-slate-500 transition hover:text-emerald-700"
+              >
+                <Layers className="h-4 w-4 text-emerald-600" /> Filter by area
+                <ChevronDown className={`h-4 w-4 transition ${areaOpen ? "rotate-180" : ""}`} />
               </button>
-              <div className="flex flex-wrap items-center gap-2">
-                {patches.map((p) => {
-                  const ps = patchStyles(p.color);
-                  const count = doctors.filter((d) => d.patchId === p.id).length;
-                  const active = patchFilter === p.id;
-                  return (
-                    <button key={p.id} onClick={() => setPatchFilter(active ? "all" : p.id)} className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-extrabold transition ${active ? "border-emerald-600 bg-emerald-700 text-white shadow" : `${ps.badge} hover:shadow`}`}>
-                      {!active && <span className={`h-2 w-2 rounded-full ${ps.dot}`} />}
-                      {p.name} · {count}
-                    </button>
-                  );
-                })}
-                <button onClick={() => setPatchFilter(patchFilter === "none" ? "all" : "none")} className={`rounded-full px-3 py-1.5 text-xs font-extrabold ring-1 transition ${patchFilter === "none" ? "bg-slate-800 text-white ring-slate-800" : "bg-white text-slate-500 ring-slate-200 hover:text-slate-800"}`}>
-                  No patch · {doctors.filter((d) => !d.patchId).length}
+
+              {/* Always-visible summary of the active area filter */}
+              {!areaOpen && (
+                <span className="rounded-full bg-emerald-700 px-3 py-1.5 text-xs font-extrabold text-white">
+                  {patchFilter === "all"
+                    ? `All areas · ${doctors.length}`
+                    : patchFilter === "none"
+                      ? `No patch · ${doctors.filter((d) => !d.patchId).length}`
+                      : `${patches.find((p) => p.id === patchFilter)?.name || "Area"} · ${doctors.filter((d) => d.patchId === patchFilter).length}`}
+                </span>
+              )}
+              {!areaOpen && patchFilter !== "all" && (
+                <button onClick={() => setPatchFilter("all")} className="rounded-full px-2 py-1.5 text-xs font-bold text-slate-400 underline-offset-2 hover:text-rose-600 hover:underline">
+                  Clear
                 </button>
-              </div>
+              )}
+
               <button onClick={() => { setPatchDraft({ id: "", name: "" }); setPatchModal(true); }} className="ml-auto flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-4 py-1.5 text-xs font-extrabold text-emerald-700 transition hover:bg-emerald-50">
                 <Plus className="h-3.5 w-3.5" /> Manage patches
               </button>
-            </div>
-            {/* Grade filter — sits right under Area patches */}
-            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-200/70 pt-3">
-              <span className="flex items-center gap-1.5 px-1 text-xs font-extrabold uppercase tracking-widest text-slate-500">
-                <Target className="h-4 w-4 text-emerald-600" /> Grade
-              </span>
-              <button onClick={() => setGradeFilter("All")} className={`rounded-full px-3.5 py-1.5 text-xs font-extrabold transition ${gradeFilter === "All" ? "bg-emerald-700 text-white shadow" : "bg-white text-slate-500 ring-1 ring-slate-200 hover:text-emerald-700"}`}>
-                All · {doctors.length}
-              </button>
-              {(["A", "B", "C"] as Grade[]).map((g) => {
-                const count = doctors.filter((d) => doctorGrade(d) === g).length;
-                const active = gradeFilter === g;
-                return (
-                  <button
-                    key={g}
-                    onClick={() => setGradeFilter(active ? "All" : g)}
-                    title={`Grade ${g} — ${GRADE_VISITS[g]} visit${GRADE_VISITS[g] > 1 ? "s" : ""} per month`}
-                    className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-extrabold transition ${active ? "border-emerald-600 bg-emerald-700 text-white shadow" : `${GRADE_STYLE[g]} hover:shadow`}`}
-                  >
-                    {g} · {GRADE_VISITS[g]} visit{GRADE_VISITS[g] > 1 ? "s" : ""} · {count}
-                  </button>
-                );
-              })}
-            </div>
 
+              {/* Expanded chips — empty areas hidden to keep it short */}
+              {areaOpen && (
+                <div className="mt-1 flex w-full flex-wrap items-center gap-2 border-t border-slate-200/70 pt-3">
+                  <button onClick={() => setPatchFilter("all")} className={`rounded-full px-3.5 py-1.5 text-xs font-extrabold transition ${patchFilter === "all" ? "bg-emerald-700 text-white shadow" : "bg-white text-slate-500 ring-1 ring-slate-200 hover:text-emerald-700"}`}>
+                    All · {doctors.length}
+                  </button>
+                  {patches.map((p) => {
+                    const ps = patchStyles(p.color);
+                    const count = doctors.filter((d) => d.patchId === p.id).length;
+                    const active = patchFilter === p.id;
+                    /* Hide empty areas, but never hide the one you're filtering by */
+                    if (count === 0 && !active) return null;
+                    return (
+                      <button key={p.id} onClick={() => setPatchFilter(active ? "all" : p.id)} title={`Show only doctors in ${p.name}`} className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-extrabold transition ${active ? "border-emerald-600 bg-emerald-700 text-white shadow" : `${ps.badge} hover:shadow`}`}>
+                        {!active && <span className={`h-2 w-2 rounded-full ${ps.dot}`} />}
+                        {p.name} · {count}
+                      </button>
+                    );
+                  })}
+                  {(() => {
+                    const noPatch = doctors.filter((d) => !d.patchId).length;
+                    const active = patchFilter === "none";
+                    if (noPatch === 0 && !active) return null;
+                    return (
+                      <button onClick={() => setPatchFilter(active ? "all" : "none")} title="Doctors with no area assigned" className={`rounded-full px-3 py-1.5 text-xs font-extrabold ring-1 transition ${active ? "bg-slate-800 text-white ring-slate-800" : "bg-white text-slate-500 ring-slate-200 hover:text-slate-800"}`}>
+                        No patch · {noPatch}
+                      </button>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
             <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-200/70 pt-3">
               <button onClick={() => setCallsTodayOnly(!callsTodayOnly)} className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-extrabold ring-1 transition ${callsTodayOnly ? "bg-emerald-700 text-white ring-emerald-700 shadow" : "bg-white text-slate-600 ring-slate-200 hover:ring-emerald-300 hover:text-emerald-700"}`}>
                 <CalendarClock className="h-3.5 w-3.5" /> {callsTodayOnly ? "Showing: calls today ✕" : `Calls today · ${callsTodayList.length}`}
@@ -3365,8 +3366,8 @@ export default function App() {
                   <CalendarDays className="h-3.5 w-3.5 shrink-0" /> <span className="max-w-[220px] truncate">{apptFilter}</span> ✕
                 </button>
               )}
-              {(patchFilter !== "all" || callsTodayOnly || specFilter !== "All" || productFilter !== "All" || apptFilter !== "All" || gradeFilter !== "All" || search) && (
-                <button onClick={() => { setPatchFilter("all"); setCallsTodayOnly(false); setSpecFilter("All"); setProductFilter("All"); setApptFilter("All"); setGradeFilter("All"); setSearch(""); }} className="rounded-full px-3 py-1.5 text-xs font-bold text-slate-400 underline-offset-2 hover:text-rose-600 hover:underline">
+              {(patchFilter !== "all" || callsTodayOnly || specFilter !== "All" || productFilter !== "All" || apptFilter !== "All" || search) && (
+                <button onClick={() => { setPatchFilter("all"); setCallsTodayOnly(false); setSpecFilter("All"); setProductFilter("All"); setApptFilter("All"); setSearch(""); }} className="rounded-full px-3 py-1.5 text-xs font-bold text-slate-400 underline-offset-2 hover:text-rose-600 hover:underline">
                   Clear all filters
                 </button>
               )}
@@ -3441,7 +3442,6 @@ export default function App() {
                 const next = nextCallDate(d);
                 const open = expandedIds.has(d.id);
                 const picked = selectedIds.has(d.id);
-                const grade = doctorGrade(d);
                 return (
                   <article
                     key={d.id}
@@ -3472,9 +3472,6 @@ export default function App() {
                           ) : (
                             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-extrabold text-slate-500">{d.area || "No patch"}</span>
                           )}
-                          <span title={`Grade ${grade} · ${GRADE_VISITS[grade]} visit${GRADE_VISITS[grade] > 1 ? "s" : ""}/month`} className={`rounded-full border px-2 py-0.5 text-[11px] font-extrabold ${GRADE_STYLE[grade]}`}>
-                            {grade} · {GRADE_VISITS[grade]}v
-                          </span>
                           {d.priority === "High" && <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-extrabold text-rose-600 ring-1 ring-rose-100">High priority</span>}
                         </div>
                       </div>
