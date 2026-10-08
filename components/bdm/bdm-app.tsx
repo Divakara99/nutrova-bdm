@@ -208,17 +208,6 @@ const SPECIALTIES = [
   "Other",
 ];
 
-const PRESETS: { label: string; days: string[] }[] = [
-  { label: "Mon – Sat", days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] },
-  { label: "Mon – Fri", days: ["Mon", "Tue", "Wed", "Thu", "Fri"] },
-  { label: "Tue – Sat", days: ["Tue", "Wed", "Thu", "Fri", "Sat"] },
-  { label: "Tue – Fri", days: ["Tue", "Wed", "Thu", "Fri"] },
-  { label: "Only Tue", days: ["Tue"] },
-  { label: "Only Thu", days: ["Thu"] },
-  { label: "Only Fri", days: ["Fri"] },
-  { label: "All days", days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },
-];
-
 /* Appointment — how to take appointment (as discussed: walk-in / phone / reception / prior booking) */
 const APPOINTMENT_MODES = [
   "Walk-in",
@@ -1537,6 +1526,7 @@ export default function App() {
   const [patchModal, setPatchModal] = useState(false);
   const [patchDraft, setPatchDraft] = useState<{ id: string; name: string }>({ id: "", name: "" });
   const [quickArea, setQuickArea] = useState("");
+  const [quickAreaOpen, setQuickAreaOpen] = useState(false);
   const [monWeek, setMonWeek] = useState("1st");
   const [monDay, setMonDay] = useState("Tuesday");
   const [confirmDelete, setConfirmDelete] = useState<{ open: boolean; title: string; label: string; detail: string; confirmText: string; onYes: () => void }>({ open: false, title: "", label: "", detail: "", confirmText: "", onYes: () => {} });
@@ -1595,6 +1585,71 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfg, session?.email]);
+
+  /* Share one invoice on WhatsApp. Uses the phone's native share sheet when
+     available (lets you pick a contact), else falls back to wa.me. */
+  const shareInvoiceWhatsApp = async (p: Payment) => {
+    const lines: string[] = [];
+    lines.push(`*Nutrova — Purchase Order*`);
+    lines.push(`PO: ${p.invoiceNo || "—"}`);
+    if (p.orderDate) lines.push(`Order date: ${fmtDate(p.orderDate)}`);
+    lines.push(`Doctor: ${p.doctorName}${p.doctorArea ? ` (${p.doctorArea})` : ""}`);
+    if (p.billingName) lines.push(`Billing: ${p.billingName}`);
+    if (p.items.length > 0) {
+      lines.push("");
+      lines.push("*Products*");
+      p.items.forEach((it) => lines.push(`• ${shortProduct(it.product)} × ${it.qty}${it.rate ? ` @ ${inr(it.rate)}` : ""}`));
+      lines.push(`Total qty: ${orderQty(p.items)}`);
+    } else if (p.purpose) {
+      lines.push(`Note: ${p.purpose}`);
+    }
+    lines.push("");
+    lines.push(`*Amount: ${inr(p.amount)}*`);
+    if (p.dueDate) lines.push(`Due date: ${fmtDate(p.dueDate)}`);
+    const st = p.status === "paid" ? "PAID" : isCriticalOverdue(p.dueDate) ? "OVERDUE" : "PENDING";
+    lines.push(`Status: ${st}${p.status === "paid" && p.paidDate ? ` on ${fmtDate(p.paidDate)}` : ""}`);
+    if (p.mode) lines.push(`Mode: ${p.mode}`);
+    const text = lines.join("\n");
+    const waUrl = `https://wa.me/?text=${encodeURIComponent(text)}`;
+
+    /* Open WhatsApp directly. The previous version tried navigator.share first,
+       but inside an iframe/preview that call is blocked and the catch returned
+       early — so nothing happened at all. Opening the wa.me link synchronously
+       inside the click keeps the browser's popup allowance. */
+    try {
+      const win = window.open(waUrl, "_blank", "noopener,noreferrer");
+      if (win) return;
+    } catch {
+      /* fall through */
+    }
+    /* Popup blocked (common on mobile/in-app browsers): navigate via a real
+       anchor click, which is allowed where window.open is not. */
+    try {
+      const a = document.createElement("a");
+      a.href = waUrl;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        try {
+          document.body.removeChild(a);
+        } catch {
+          /* ignore */
+        }
+      }, 300);
+      return;
+    } catch {
+      /* fall through */
+    }
+    /* Last resort: copy the invoice so it can be pasted into WhatsApp. */
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("WhatsApp blocked — invoice copied, paste it in chat", "info");
+    } catch {
+      showToast("Could not open WhatsApp", "info");
+    }
+  };
 
   /* every delete goes through this confirmation — nothing deletes instantly */
   const closeConfirm = () => setConfirmDelete({ open: false, title: "", label: "", detail: "", confirmText: "", onYes: () => {} });
@@ -2394,10 +2449,6 @@ export default function App() {
       const has = (m.draft.callDays || []).includes(day);
       return { ...m, draft: { ...m.draft, callDays: has ? m.draft.callDays.filter((x) => x !== day) : [...(m.draft.callDays || []), day] } };
     });
-  };
-
-  const applyPreset = (days: string[]) => {
-    setDoctorModal((m) => ({ ...m, draft: { ...m.draft, callDays: [...days] } }));
   };
 
   const addMonthlyRule = () => {
@@ -3884,10 +3935,26 @@ export default function App() {
           {/* purchase orders — column / row table */}
           <div className="mt-5 overflow-hidden rounded-2xl border border-slate-300 bg-white shadow-sm">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
+              {/* table-fixed + colgroup: without explicit widths the browser
+                  squeezed Doctor / Billing name down to one letter per line. */}
+              <table className="w-full min-w-[1320px] table-fixed border-collapse text-left text-sm">
+                <colgroup>
+                  <col style={{ width: "44px" }} />
+                  <col style={{ width: "170px" }} />
+                  <col style={{ width: "110px" }} />
+                  <col style={{ width: "190px" }} />
+                  <col style={{ width: "210px" }} />
+                  <col style={{ width: "230px" }} />
+                  <col style={{ width: "64px" }} />
+                  <col style={{ width: "110px" }} />
+                  <col style={{ width: "110px" }} />
+                  <col style={{ width: "120px" }} />
+                  <col style={{ width: "104px" }} />
+                  <col style={{ width: "124px" }} />
+                </colgroup>
                 <thead>
                   <tr className="bg-slate-800 text-[11px] font-extrabold uppercase tracking-wider text-white">
-                    <th className="w-10 border-r border-slate-700 px-3 py-3 text-center">#</th>
+                    <th className="border-r border-slate-700 px-3 py-3 text-center">#</th>
                     <th className="border-r border-slate-700 px-3 py-3">PO / Invoice no</th>
                     <th className="border-r border-slate-700 px-3 py-3">Order date</th>
                     <th className="border-r border-slate-700 px-3 py-3">Doctor</th>
@@ -3929,10 +3996,13 @@ export default function App() {
                         </td>
                         <td className={`${cell} whitespace-nowrap text-xs font-bold text-slate-600`}>{p.orderDate ? fmtDate(p.orderDate) : "—"}</td>
                         <td className={cell}>
-                          <p className="font-extrabold text-slate-900">{p.doctorName}</p>
-                          <p className="flex items-center gap-1 text-[11px] font-semibold text-slate-400"><MapPin className="h-3 w-3" />{p.doctorArea || "—"}</p>
+                          <p className="break-words font-extrabold leading-snug text-slate-900">{p.doctorName}</p>
+                          <p className="mt-0.5 flex items-start gap-1 text-[11px] font-semibold leading-snug text-slate-400">
+                            <MapPin className="mt-0.5 h-3 w-3 shrink-0" />
+                            <span className="break-words">{p.doctorArea || "—"}</span>
+                          </p>
                         </td>
-                        <td className={`${cell} text-xs font-bold text-slate-700`}>{p.billingName || <span className="font-semibold italic text-slate-400">—</span>}</td>
+                        <td className={`${cell} break-words text-xs font-bold leading-snug text-slate-700`}>{p.billingName || <span className="font-semibold italic text-slate-400">—</span>}</td>
                         <td className={`${cell} min-w-[250px]`}>
                           {p.items.length > 0 ? (
                             <ul className="space-y-1">
@@ -3971,6 +4041,14 @@ export default function App() {
                                 <Check className="h-3.5 w-3.5" /> Paid
                               </button>
                             )}
+                            <button
+                              onClick={() => void shareInvoiceWhatsApp(p)}
+                              title="Share this invoice on WhatsApp"
+                              aria-label="Share this invoice on WhatsApp"
+                              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#25D366] text-white shadow-sm transition hover:brightness-95"
+                            >
+                              <Share2 className="h-4 w-4" />
+                            </button>
                             <IconBtn title="Edit purchase order" onClick={() => setPaymentModal({ open: true, draft: { ...p, items: p.items.map((i) => ({ ...i })) }, editing: true })}><Pencil className="h-4 w-4" /></IconBtn>
                             <IconBtn title="Delete purchase order" danger onClick={() => deleteInvoice(p)}><Trash2 className="h-4 w-4" /></IconBtn>
                           </div>
@@ -4649,27 +4727,33 @@ export default function App() {
               </select>
             </Field>
             <Field label="City"><input value={doctorModal.draft.city} onChange={(e) => setDraft({ city: e.target.value })} placeholder="Bangalore" className={inputCls} /></Field>
+            {/* Collapsed until needed — keeps the form short */}
             <div className="sm:col-span-2">
-              <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Or create new area on the spot</span>
-              <div className="flex gap-2">
-                <input value={quickArea} onChange={(e) => setQuickArea(e.target.value)} onKeyDown={(e) => e.key === "Enter" && quickAddArea()} placeholder="Type new area name, e.g. Sarjapur" className={inputCls} />
-                <button type="button" onClick={quickAddArea} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-extrabold text-white transition hover:bg-emerald-800">
-                  <Plus className="h-4 w-4" /> Add
-                </button>
-              </div>
-            </div>
-            {patches.length > 0 && (
-              <div className="sm:col-span-2">
-                <div className="flex flex-wrap gap-1.5">
-                  <span className="py-1 text-[11px] font-bold text-slate-400">Tap to select:</span>
-                  {patches.map((p) => (
-                    <button key={p.id} type="button" onClick={() => pickPatchForDraft(p.id)} className={`rounded-full border px-2.5 py-1 text-[11px] font-extrabold transition ${doctorModal.draft.patchId === p.id ? "border-emerald-600 bg-emerald-700 text-white" : "border-slate-200 bg-slate-50 text-slate-600 hover:border-emerald-300 hover:text-emerald-700"}`}>
-                      {p.name}
-                    </button>
-                  ))}
+              <button
+                type="button"
+                onClick={() => setQuickAreaOpen((v) => !v)}
+                aria-expanded={quickAreaOpen}
+                className="flex w-full items-center gap-1.5 rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 px-3 py-2 text-left text-[11px] font-extrabold uppercase tracking-widest text-emerald-800 transition hover:bg-emerald-50"
+              >
+                <Plus className="h-3.5 w-3.5" /> Or create new area on the spot
+                <ChevronDown className={`ml-auto h-4 w-4 transition ${quickAreaOpen ? "rotate-180" : ""}`} />
+              </button>
+              {quickAreaOpen && (
+                <div className="mt-2 flex gap-2">
+                  <input
+                    autoFocus
+                    value={quickArea}
+                    onChange={(e) => setQuickArea(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && quickAddArea()}
+                    placeholder="Type new area name, e.g. Sarjapur"
+                    className={inputCls}
+                  />
+                  <button type="button" onClick={quickAddArea} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-extrabold text-white transition hover:bg-emerald-800">
+                    <Plus className="h-4 w-4" /> Add
+                  </button>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
           {/* call schedule */}
@@ -4688,18 +4772,6 @@ export default function App() {
                   </button>
                 );
               })}
-            </div>
-
-            <p className="mb-2 mt-4 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Quick patterns</p>
-            <div className="flex flex-wrap gap-1.5">
-              {PRESETS.map((p) => (
-                <button key={p.label} type="button" onClick={() => applyPreset(p.days)} className="rounded-full border border-emerald-200 bg-white px-3 py-1.5 text-xs font-extrabold text-emerald-700 transition hover:bg-emerald-700 hover:text-white">
-                  {p.label}
-                </button>
-              ))}
-              <button type="button" onClick={() => applyPreset([])} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-extrabold text-slate-400 transition hover:border-rose-300 hover:text-rose-600">
-                Clear
-              </button>
             </div>
 
             <p className="mb-2 mt-4 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Monthly rules — e.g. 1st Tuesday, 1st Thursday, Last Thursday</p>
@@ -5272,12 +5344,20 @@ function ProductSelector({ label, hint, icon, selected, onToggle, onClear, accen
 }) {
   const isE = accent === "emerald";
   const [q, setQ] = useState("");
+  /* Collapsed by default: 25 products × 2 lists made the Add Doctor form
+     extremely long. Opens on tap, and auto-opens if items are already chosen. */
+  const [open, setOpen] = useState(false);
   const query = q.trim().toLowerCase();
   const matches = (name: string) => !query || name.toLowerCase().includes(query);
   const hitCount = NUTROVA_PRODUCTS.filter((p) => matches(p.name)).length;
   return (
     <div className="mt-4 rounded-2xl border border-white/60 bg-white/70 p-3.5">
-      <div className="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full flex-wrap items-center gap-2 text-left"
+      >
         <p className={`flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest ${isE ? "text-emerald-800" : "text-amber-800"}`}>
           {icon} {label}
         </p>
@@ -5285,7 +5365,26 @@ function ProductSelector({ label, hint, icon, selected, onToggle, onClear, accen
         <span className={`ml-auto rounded-full px-2.5 py-0.5 text-[11px] font-extrabold ${isE ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
           {selected.length} selected
         </span>
-      </div>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {/* Collapsed preview of what's already picked */}
+      {!open && selected.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {selected.slice(0, 4).map((n) => (
+            <span key={n} className={`max-w-full truncate rounded-full px-2.5 py-1 text-[11px] font-extrabold ${isE ? "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200" : "bg-amber-50 text-amber-800 ring-1 ring-amber-200"}`}>
+              {shortProduct(n)}
+            </span>
+          ))}
+          {selected.length > 4 && <span className="px-1 py-1 text-[11px] font-extrabold text-slate-400">+{selected.length - 4} more</span>}
+        </div>
+      )}
+      {!open && selected.length === 0 && (
+        <p className="mt-2 text-[11px] font-semibold text-slate-400">Tap to search &amp; select from 25 Nutrova products</p>
+      )}
+
+      {open && (
+      <>
       <div className="mt-2.5 flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
         <Search className="h-3.5 w-3.5 shrink-0 text-slate-400" />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search 25 products — e.g. collagen, whey, glutalume…`} className="w-full bg-transparent text-xs font-semibold text-slate-700 outline-none placeholder:text-slate-400" />
@@ -5333,6 +5432,8 @@ function ProductSelector({ label, hint, icon, selected, onToggle, onClear, accen
         <button type="button" onClick={onClear} className="mt-2.5 text-xs font-bold text-slate-400 underline-offset-2 hover:text-rose-600 hover:underline">
           Clear {label.toLowerCase()} ({selected.length})
         </button>
+      )}
+      </>
       )}
     </div>
   );
