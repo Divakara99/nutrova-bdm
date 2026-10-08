@@ -1,16 +1,16 @@
 "use client";
 
-import dynamic from "next/dynamic";
-
-const BdmApp = dynamic(() => import("./bdm-app"), {
-  ssr: false,
-  loading: () => (
-    <div className="flex min-h-dvh items-center justify-center text-sm text-nutrova-800">
-      Loading Nutrova Doctor Tracker…
-    </div>
-  ),
-});
+// VISIBILITY FIX — Never use dynamic(ssr:false) here again. That pattern
+// ships an empty "Loading…" div as the entire server HTML, so if the JS
+// bundle is slow/blocked the page looks blank forever. bdm-app.tsx is
+// SSR-safe (all localStorage/window access is try/catch wrapped), so we
+// render it directly: server HTML already contains the login UI.
+import BdmApp from "./bdm-app";
 
 export function BdmAppLoader() {
-  return <BdmApp />;
+  return (
+    <div suppressHydrationWarning>
+      <BdmApp />
+    </div>
+  );
 }

@@ -1,3 +1,6 @@
+/* STYLE LOCK — Must stay identical to https://v0-nutrova.vercel.app globals.css.
+   Do not remove @theme (nutrova-*, background) or change body to dark.
+   The BDM tracker + all helper pages depend on this light theme. */
 @import "tailwindcss";
 
 @theme {

@@ -39,6 +39,7 @@ import {
   Stethoscope,
   Target,
   Trash2,
+  Upload,
   User,
   UserPlus,
   Users,
@@ -48,6 +49,7 @@ import {
   X,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { DoctorImportDialog, type ParsedDoctor } from "./doctor-import";
 import {
   SETUP_SQL,
   adoptRecoverySession,
@@ -951,6 +953,10 @@ function setAlarmSoundStorage(id: AlarmSoundId) {
   }
 }
 let alarmAudioCtx: AudioContext | null = null;
+/* Track every live oscillator so X / Dismiss / Snooze / Done can kill the
+   sound instantly — ctx.close() alone can leave already-scheduled tones
+   playing on some phones, which is why the popup hid but audio continued. */
+const liveOscillators = new Set<OscillatorNode>();
 function alarmCtx(): AudioContext | null {
   try {
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -967,18 +973,26 @@ function alarmTone(
   dest: AudioNode,
   opts: { freq: number; freqEnd?: number; type: OscillatorType; at: number; dur: number; vol: number }
 ) {
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.type = opts.type;
-  osc.frequency.setValueAtTime(opts.freq, opts.at);
-  if (opts.freqEnd) osc.frequency.linearRampToValueAtTime(opts.freqEnd, opts.at + opts.dur);
-  gain.gain.setValueAtTime(0.001, opts.at);
-  gain.gain.exponentialRampToValueAtTime(opts.vol, opts.at + 0.03);
-  gain.gain.exponentialRampToValueAtTime(0.001, opts.at + opts.dur);
-  osc.connect(gain);
-  gain.connect(dest);
-  osc.start(opts.at);
-  osc.stop(opts.at + opts.dur + 0.05);
+  try {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    liveOscillators.add(osc);
+    osc.onended = () => liveOscillators.delete(osc);
+    osc.type = opts.type;
+    osc.frequency.setValueAtTime(opts.freq, opts.at);
+    if (opts.freqEnd) osc.frequency.linearRampToValueAtTime(opts.freqEnd, opts.at + opts.dur);
+    gain.gain.setValueAtTime(0.001, opts.at);
+    gain.gain.exponentialRampToValueAtTime(opts.vol, opts.at + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.001, opts.at + opts.dur);
+    osc.connect(gain);
+    gain.connect(dest);
+    osc.start(opts.at);
+    osc.stop(opts.at + opts.dur + 0.05);
+    // Safety: force-remove from tracking shortly after it should have ended
+    window.setTimeout(() => liveOscillators.delete(osc), (opts.at - ctx.currentTime + opts.dur + 0.5) * 1000 + 500);
+  } catch {
+    /* ignore */
+  }
 }
 const ALARM_MUTED_KEY = "nutrova-alarm-muted-v1";
 function isAlarmMuted(): boolean {
@@ -995,12 +1009,25 @@ function setAlarmMutedStorage(muted: boolean) {
     /* ignore */
   }
 }
-/* Immediately silence any scheduled alarm audio */
+/* Immediately silence any scheduled alarm audio — stops every oscillator
+   first (scheduled future tones), then suspends + closes the context.
+   Called by X / Dismiss / Snooze / Done / Mute so popup-hide ALWAYS = silence. */
 function stopAlarmSound() {
+  try {
+    liveOscillators.forEach((osc) => {
+      try {
+        osc.onended = null;
+        try { osc.stop(0); } catch { /* already stopped */ }
+        try { osc.disconnect(); } catch { /* ignore */ }
+      } catch { /* ignore */ }
+    });
+  } catch { /* ignore */ }
+  liveOscillators.clear();
   try {
     if (alarmAudioCtx) {
       const ctx = alarmAudioCtx;
       alarmAudioCtx = null;
+      try { void ctx.suspend?.().catch(() => {}); } catch { /* ignore */ }
       void ctx.close().catch(() => {});
     }
   } catch {
@@ -1427,6 +1454,7 @@ export default function App() {
   const [apptFilter, setApptFilter] = useState("All");
 
   const [doctorModal, setDoctorModal] = useState<{ open: boolean; draft: Doctor; editing: boolean }>({ open: false, draft: emptyDoctor(), editing: false });
+  const [doctorImportOpen, setDoctorImportOpen] = useState(false);
   const [reminderModal, setReminderModal] = useState<{ open: boolean; draft: Reminder; editing: boolean }>({ open: false, draft: emptyReminder(), editing: false });
   const [paymentModal, setPaymentModal] = useState<{ open: boolean; draft: Payment; editing: boolean }>({ open: false, draft: emptyPayment(), editing: false });
   const [patchModal, setPatchModal] = useState(false);
@@ -1476,7 +1504,9 @@ export default function App() {
       showToast("Alarm sound on");
     }
   };
-  /* Silence + clear the whole ringing popup (fixes sound continuing after X) */
+  /* X button: hide popup AND stop sound together — guaranteed.
+     Runs stop twice (before + after state update) so even a tone scheduled
+     in the same tick is killed. */
   const skipAllRinging = () => {
     stopAlarmSound();
     setRinging((prev) => {
@@ -1486,6 +1516,9 @@ export default function App() {
       });
       return [];
     });
+    // Second pass catches anything scheduled between click and re-render
+    window.setTimeout(() => stopAlarmSound(), 0);
+    window.setTimeout(() => stopAlarmSound(), 250);
   };
 
   const enableAlerts = async () => {
@@ -1595,11 +1628,20 @@ export default function App() {
     }, 800);
     return () => window.clearTimeout(t);
   }, [reminders, doctors, payments, signedIn]);
+  /* Safety net: whenever the popup is gone for ANY reason, kill the sound.
+     This is what guarantees "hide = silence" even if data reloads. */
+  useEffect(() => {
+    if (ringing.length === 0) stopAlarmSound();
+  }, [ringing.length]);
+  /* Stop sound if the component unmounts (navigation / logout) */
+  useEffect(() => () => stopAlarmSound(), []);
+
   const snoozeReminder = (id: string, mins = 10) => {
     stopAlarmSound();
     snoozedRef.current.set(id, Date.now() + mins * 60000);
     dismissedRef.current.delete(id);
     setRinging((prev) => prev.filter((x) => x.id !== id));
+    window.setTimeout(() => stopAlarmSound(), 0);
     showToast(`Snoozed for ${mins} min`, "info");
   };
   const dismissRinging = (id: string) => {
@@ -1607,6 +1649,7 @@ export default function App() {
     dismissedRef.current.add(id);
     if (id.startsWith("morning-")) markMorningFired(dataOwnerKey, id.slice("morning-".length));
     setRinging((prev) => prev.filter((x) => x.id !== id));
+    window.setTimeout(() => stopAlarmSound(), 0);
   };
   const completeRinging = (r: Reminder) => {
     stopAlarmSound();
@@ -1615,6 +1658,7 @@ export default function App() {
     if (r.id.startsWith("morning-")) markMorningFired(dataOwnerKey, r.date);
     else setReminders((prev) => prev.map((x) => (x.id === r.id ? { ...x, done: true } : x)));
     setRinging((prev) => prev.filter((x) => x.id !== r.id));
+    window.setTimeout(() => stopAlarmSound(), 0);
     showToast(r.id.startsWith("morning-") ? "Morning briefing done — have a great day!" : "Reminder completed");
   };
 
@@ -1637,9 +1681,16 @@ export default function App() {
           if (dismissedRef.current.has(r.id)) continue;
           if (!ringingIds.has(r.id)) fresh.push(r);
         }
+        /* Popup must NEVER auto-hide on cloud reload: only drop a ringing item
+           when its reminder is explicitly marked done. A missing id means the
+           list reloaded (owner switch / sync) — keep the popup visible instead
+           of hiding it while the sound keeps playing in the background. */
         const alive = prev.filter((x) => {
+          if (dismissedRef.current.has(x.id)) return false;
           const cur = reminders.find((rr) => rr.id === x.id);
-          return cur && !cur.done;
+          if (x.id.startsWith("morning-")) return true;
+          if (!cur) return true;
+          return !cur.done;
         });
         if (fresh.length > 0) {
           playAlarmSound(3, alarmSound);
@@ -2140,6 +2191,72 @@ export default function App() {
     showToast(doctorModal.editing ? "Doctor updated" : "Doctor added to patch");
   };
 
+  /* Bulk upload: CSV rows → doctors. Matches area names to existing patches
+     (case-insensitive); brand-new areas auto-create their patch so the
+     Area-patches filter stays correct. Skips exact name+phone duplicates. */
+  const importDoctorsBulk = (parsed: ParsedDoctor[]) => {
+    if (!parsed || parsed.length === 0) return;
+    const patchByName = new Map(patches.map((p) => [p.name.trim().toLowerCase(), p]));
+    const newPatches: Patch[] = [];
+    const fresh: Doctor[] = [];
+    let skipped = 0;
+    const seen = new Set(doctors.map((d) => `${d.name.trim().toLowerCase()}|${(d.phone || "").replace(/\D/g, "")}`));
+    for (const pd of parsed) {
+      const area = (pd.area || "").trim();
+      let patchId = "";
+      if (area) {
+        const hit = patchByName.get(area.toLowerCase());
+        if (hit) patchId = hit.id;
+        else {
+          const created: Patch = { id: uid(), name: area, color: "emerald" };
+          patchByName.set(area.toLowerCase(), created);
+          newPatches.push(created);
+          patchId = created.id;
+        }
+      }
+      const dupKey = `${pd.name.trim().toLowerCase()}|${(pd.phone || "").replace(/\D/g, "")}`;
+      if (seen.has(dupKey)) { skipped++; continue; }
+      seen.add(dupKey);
+      fresh.push({
+        id: uid(),
+        name: pd.name.trim(),
+        specialty: pd.specialty || "Dermatologist",
+        qualification: pd.qualification || "",
+        clinic: pd.clinic || "",
+        area,
+        patchId,
+        city: pd.city || "Bangalore",
+        phone: pd.phone || "",
+        email: pd.email || "",
+        frequency: pd.frequency || "Weekly",
+        lastVisit: pd.lastVisit || "",
+        nextVisit: pd.nextVisit || "",
+        notes: pd.notes || "",
+        priority: pd.priority || "Medium",
+        callDays: pd.callDays?.length ? pd.callDays : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+        monthlyCalls: pd.monthlyCalls || [],
+        callTimeFrom: pd.callTimeFrom || "10:00",
+        callTimeTo: pd.callTimeTo || "13:00",
+        focusProducts: pd.focusProducts || [],
+        followProducts: pd.followProducts || [],
+        appointmentModes: pd.appointmentModes || [],
+        appointmentContact: pd.appointmentContact || "",
+        appointmentPhone: pd.appointmentPhone || "",
+        appointmentLead: pd.appointmentLead || "Same day",
+        appointmentNote: pd.appointmentNote || "",
+      });
+    }
+    if (newPatches.length > 0) setPatches((prev) => [...prev, ...newPatches]);
+    if (fresh.length > 0) setDoctors((prev) => [...fresh, ...prev]);
+    setDoctorImportOpen(false);
+    showToast(
+      fresh.length > 0
+        ? `Imported ${fresh.length} doctor${fresh.length !== 1 ? "s" : ""}${newPatches.length > 0 ? ` · ${newPatches.length} new patch${newPatches.length !== 1 ? "es" : ""}` : ""}${skipped > 0 ? ` · ${skipped} duplicate${skipped !== 1 ? "s" : ""} skipped` : ""}`
+        : "Nothing imported — all rows were duplicates",
+      fresh.length > 0 ? "ok" : "info"
+    );
+  };
+
   const toggleCallDay = (day: string) => {
     setDoctorModal((m) => {
       const has = (m.draft.callDays || []).includes(day);
@@ -2236,6 +2353,7 @@ export default function App() {
     else setReminders((prev) => [{ ...r, id: uid() }, ...prev]);
     dismissedRef.current.delete(r.id);
     snoozedRef.current.delete(r.id);
+    stopAlarmSound();
     setRinging((prev) => prev.filter((x) => x.id !== r.id));
     setReminderModal({ open: false, draft: emptyReminder(), editing: false });
     showToast(reminderModal.editing ? "Reminder updated" : "Reminder added");
@@ -3098,6 +3216,9 @@ export default function App() {
             <div className="flex flex-wrap items-center gap-2">
               <button onClick={exportDoctors} title={`Download ${filteredDoctors.length} doctors as CSV`} className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-extrabold text-emerald-800 shadow-sm transition hover:bg-emerald-100">
                 <Download className="h-4 w-4" /> Download <span className="rounded-full bg-emerald-700 px-2 py-0.5 text-[11px] text-white">{filteredDoctors.length}</span>
+              </button>
+              <button onClick={() => setDoctorImportOpen(true)} title="Bulk upload doctors from CSV" className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-4 py-2 text-sm font-extrabold text-emerald-700 shadow-sm transition hover:bg-emerald-50">
+                <Upload className="h-4 w-4" /> Upload
               </button>
               <button onClick={() => openDoctorModal(false, emptyDoctor())} className="flex items-center gap-1.5 rounded-full bg-amber-400 px-5 py-2 text-sm font-extrabold text-amber-950 shadow-md shadow-amber-200 transition hover:bg-amber-300">
                 <Plus className="h-4 w-4" /> Add Doctor
@@ -4193,7 +4314,7 @@ export default function App() {
                   </div>
                 </div>
                 <p className="flex items-start gap-1.5 text-[11px] font-semibold leading-relaxed text-slate-500">
-                  <Lock className="mt-0.5 h-3 w-3 shrink-0" /> Locked — built into the app. The URL and key always stay the same and can't be edited.
+                  <Lock className="mt-0.5 h-3 w-3 shrink-0" /> Locked — built into the app{(typeof process !== "undefined" && process.env?.NEXT_PUBLIC_SUPABASE_URL) ? " via Vercel env vars (NEXT_PUBLIC_SUPABASE_URL + KEY)" : ""}. To move projects, set those Vercel env vars and redeploy — no code change needed.
                 </p>
               </div>
 
@@ -4484,6 +4605,11 @@ export default function App() {
         </Modal>
       )}
 
+      {/* --------------------------- doctor bulk-upload --------------------------- */}
+      {doctorImportOpen && (
+        <DoctorImportDialog onClose={() => setDoctorImportOpen(false)} onImport={importDoctorsBulk} />
+      )}
+
       {/* ------------------------------- patch modal ------------------------------ */}
       {patchModal && (
         <Modal title="Manage Area Patches" wide onClose={() => setPatchModal(false)}>
@@ -4718,10 +4844,12 @@ export default function App() {
         </Modal>
       )}
 
-      {/* ---------- Reminder alarm: ringing overlay ---------- */}
+      {/* ---------- Reminder alarm: ringing overlay ----------
+          Stays until Done / Snooze / Dismiss / X. Backdrop click does nothing
+          on purpose (prevents accidental hide). X = hide + stop sound. */}
       {ringing.length > 0 && (
-        <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/60 p-4 backdrop-blur-sm sm:items-center">
-          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+        <div role="alertdialog" aria-label="Reminder alarm" className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/60 p-4 backdrop-blur-sm sm:items-center">
+          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl ring-1 ring-amber-300">
             <div className="bg-gradient-to-r from-amber-400 to-orange-400 px-6 py-5 text-amber-950">
               <div className="flex items-center gap-3">
                 <div className="anim-ring flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/90 shadow">
@@ -4729,7 +4857,7 @@ export default function App() {
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="text-lg font-extrabold leading-tight">Reminder alarm!</p>
-                  <p className="text-xs font-bold opacity-80">{ringing.length} task{ringing.length > 1 ? "s" : ""} due now</p>
+                  <p className="text-xs font-bold opacity-80">{ringing.length} task{ringing.length > 1 ? "s" : ""} due now · stays until you act</p>
                 </div>
                 <button onClick={() => playAlarmSound(2, alarmSound, true)} title="Replay sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/90 text-amber-700 shadow transition hover:bg-white">
                   <RefreshCcw className="h-5 w-5" />
@@ -4737,8 +4865,8 @@ export default function App() {
                 <button onClick={toggleMuted} title={muted ? "Unmute alarm sound" : "Mute alarm sound"} aria-label={muted ? "Unmute alarm sound" : "Mute alarm sound"} className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full shadow transition ${muted ? "bg-slate-900 text-white hover:bg-slate-700" : "bg-white/90 text-amber-700 hover:bg-white"}`}>
                   {muted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
                 </button>
-                <button onClick={skipAllRinging} title="Skip alarm" aria-label="Skip alarm" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
-                  <X className="h-5 w-5" />
+                <button onClick={skipAllRinging} title="Close + stop sound" aria-label="Close alarm and stop sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
+                  <X className="h-5 w-5" strokeWidth={3} />
                 </button>
               </div>
             </div>

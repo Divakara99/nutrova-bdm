@@ -23,9 +23,23 @@ const SB_STORAGE_PREFIX = "sb-";
 const RECOVERY_INTENT_KEY = "nutrova-password-reset-pending-v1";
 
 /* Nutrova Supabase project. The publishable key is public by design — it is meant to
-   ship inside the app. Data stays private because every row is protected by RLS. */
-const DEFAULT_URL = "https://defrdyzvtoestbjiqkaj.supabase.co";
-const DEFAULT_KEY = "sb_publishable__3FND446FELWD9zzaNjKbw_arjawQLP";
+   ship inside the app. Data stays private because every row is protected by RLS.
+   VERCEL DEPLOY: set NEXT_PUBLIC_SUPABASE_URL + NEXT_PUBLIC_SUPABASE_ANON_KEY
+   (or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) in Vercel → Project → Settings →
+   Environment Variables, then redeploy. If those are set they win; otherwise
+   the built-in Nutrova project below is used. To use a different Supabase
+   project, just send the new URL + anon/publishable key and set those vars. */
+const BUILTIN_URL = "https://defrdyzvtoestbjiqkaj.supabase.co";
+const BUILTIN_KEY = "sb_publishable__3FND446FELWD9zzaNjKbw_arjawQLP";
+const ENV_URL =
+  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_SUPABASE_URL) || "";
+const ENV_KEY =
+  (typeof process !== "undefined" &&
+    (process.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+      process.env?.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)) ||
+  "";
+const DEFAULT_URL = ENV_URL.trim() || BUILTIN_URL;
+const DEFAULT_KEY = ENV_KEY.trim() || BUILTIN_KEY;
 
 export const SETUP_SQL = `-- ============================================================
 -- Nutrova Doctor Tracker — Supabase setup (safe to re-run)
@@ -170,9 +184,16 @@ function toSession(
 }
 
 /* ------------------------------- config ------------------------------- */
-/* The connection is LOCKED to the Nutrova project above. It can't be edited in the app,
-   saved over on the phone, or overridden by a link, so the URL and key always stay the same. */
+/* The connection resolves once: Vercel env vars win, else the built-in Nutrova
+   project. It can't be edited in the app, saved over on the phone, or overridden
+   by a link, so the URL and key stay stable on every device. */
 const LOCKED_CONFIG: BackendConfig = { url: clean(DEFAULT_URL), key: DEFAULT_KEY };
+
+/* Vercel/Supabase status helper for Settings + deploy checks (no secrets leaked). */
+export function backendSource(): { url: string; maskedKey: string; fromEnv: boolean } {
+  const fromEnv = Boolean(ENV_URL.trim() && ENV_KEY.trim());
+  return { url: clean(DEFAULT_URL), maskedKey: maskKey(DEFAULT_KEY), fromEnv };
+}
 
 export function readConfig(): BackendConfig {
   try {
@@ -187,7 +208,7 @@ export function readConfig(): BackendConfig {
     /* ignore */
   }
   try {
-    /* older share links carried a connection in the address (#cfg=…) — ignore it and tidy the address */
+    /* older share links carried a connection in the address (#cfg=��) — ignore it and tidy the address */
     if (/cfg=/.test(window.location.hash)) {
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
