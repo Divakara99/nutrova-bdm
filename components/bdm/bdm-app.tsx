@@ -39,6 +39,7 @@ import {
   Stethoscope,
   Target,
   Trash2,
+  Upload,
   User,
   UserPlus,
   Users,
@@ -48,6 +49,7 @@ import {
   X,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { DoctorImportDialog, type ParsedDoctor } from "./doctor-import";
 import {
   SETUP_SQL,
   adoptRecoverySession,
@@ -376,6 +378,26 @@ const migrateProducts = (list: unknown): string[] => {
 };
 
 /* Patches have no colour option — single emerald style everywhere */
+/* ---------------- Doctor grade: A = 3 visits, B = 2, C = 1 (per month) ----------------
+   Grade is stored on the doctor when set, otherwise derived so existing data
+   works immediately: monthly call rules first, then priority. */
+type Grade = "A" | "B" | "C";
+const GRADE_VISITS: Record<Grade, number> = { A: 3, B: 2, C: 1 };
+const GRADE_STYLE: Record<Grade, string> = {
+  A: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  B: "border-sky-200 bg-sky-50 text-sky-800",
+  C: "border-slate-200 bg-slate-100 text-slate-600",
+};
+function doctorGrade(d: Doctor): Grade {
+  const g = (d as Doctor & { grade?: string }).grade;
+  if (g === "A" || g === "B" || g === "C") return g;
+  const monthly = (d.monthlyCalls || []).length;
+  if (monthly >= 3) return "A";
+  if (monthly === 2) return "B";
+  if (monthly === 1) return "C";
+  return d.priority === "High" ? "A" : d.priority === "Low" ? "C" : "B";
+}
+
 function patchStyles(_color?: string) {
   void _color;
   return { dot: "bg-emerald-500", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", ring: "ring-emerald-200", soft: "bg-emerald-50" };
@@ -951,6 +973,10 @@ function setAlarmSoundStorage(id: AlarmSoundId) {
   }
 }
 let alarmAudioCtx: AudioContext | null = null;
+/* Track every live oscillator so X / Dismiss / Snooze / Done can kill the
+   sound instantly — ctx.close() alone can leave already-scheduled tones
+   playing on some phones, which is why the popup hid but audio continued. */
+const liveOscillators = new Set<OscillatorNode>();
 function alarmCtx(): AudioContext | null {
   try {
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -967,18 +993,26 @@ function alarmTone(
   dest: AudioNode,
   opts: { freq: number; freqEnd?: number; type: OscillatorType; at: number; dur: number; vol: number }
 ) {
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.type = opts.type;
-  osc.frequency.setValueAtTime(opts.freq, opts.at);
-  if (opts.freqEnd) osc.frequency.linearRampToValueAtTime(opts.freqEnd, opts.at + opts.dur);
-  gain.gain.setValueAtTime(0.001, opts.at);
-  gain.gain.exponentialRampToValueAtTime(opts.vol, opts.at + 0.03);
-  gain.gain.exponentialRampToValueAtTime(0.001, opts.at + opts.dur);
-  osc.connect(gain);
-  gain.connect(dest);
-  osc.start(opts.at);
-  osc.stop(opts.at + opts.dur + 0.05);
+  try {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    liveOscillators.add(osc);
+    osc.onended = () => liveOscillators.delete(osc);
+    osc.type = opts.type;
+    osc.frequency.setValueAtTime(opts.freq, opts.at);
+    if (opts.freqEnd) osc.frequency.linearRampToValueAtTime(opts.freqEnd, opts.at + opts.dur);
+    gain.gain.setValueAtTime(0.001, opts.at);
+    gain.gain.exponentialRampToValueAtTime(opts.vol, opts.at + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.001, opts.at + opts.dur);
+    osc.connect(gain);
+    gain.connect(dest);
+    osc.start(opts.at);
+    osc.stop(opts.at + opts.dur + 0.05);
+    // Safety: force-remove from tracking shortly after it should have ended
+    window.setTimeout(() => liveOscillators.delete(osc), (opts.at - ctx.currentTime + opts.dur + 0.5) * 1000 + 500);
+  } catch {
+    /* ignore */
+  }
 }
 const ALARM_MUTED_KEY = "nutrova-alarm-muted-v1";
 function isAlarmMuted(): boolean {
@@ -995,12 +1029,25 @@ function setAlarmMutedStorage(muted: boolean) {
     /* ignore */
   }
 }
-/* Immediately silence any scheduled alarm audio */
+/* Immediately silence any scheduled alarm audio — stops every oscillator
+   first (scheduled future tones), then suspends + closes the context.
+   Called by X / Dismiss / Snooze / Done / Mute so popup-hide ALWAYS = silence. */
 function stopAlarmSound() {
+  try {
+    liveOscillators.forEach((osc) => {
+      try {
+        osc.onended = null;
+        try { osc.stop(0); } catch { /* already stopped */ }
+        try { osc.disconnect(); } catch { /* ignore */ }
+      } catch { /* ignore */ }
+    });
+  } catch { /* ignore */ }
+  liveOscillators.clear();
   try {
     if (alarmAudioCtx) {
       const ctx = alarmAudioCtx;
       alarmAudioCtx = null;
+      try { void ctx.suspend?.().catch(() => {}); } catch { /* ignore */ }
       void ctx.close().catch(() => {});
     }
   } catch {
@@ -1427,6 +1474,53 @@ export default function App() {
   const [apptFilter, setApptFilter] = useState("All");
 
   const [doctorModal, setDoctorModal] = useState<{ open: boolean; draft: Doctor; editing: boolean }>({ open: false, draft: emptyDoctor(), editing: false });
+  const [doctorImportOpen, setDoctorImportOpen] = useState(false);
+  /* Doctor cards: collapsed by default, tap to expand. Multi-select for bulk delete. */
+  const [gradeFilter, setGradeFilter] = useState<"All" | Grade>("All");
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const toggleExpanded = (id: string) =>
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleSelected = (id: string) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  };
+  /* Bulk delete — one confirmation that lists the names before deleting */
+  const deleteSelectedDoctors = () => {
+    const picked = doctors.filter((d) => selectedIds.has(d.id));
+    if (picked.length === 0) return;
+    const names = picked.slice(0, 8).map((d) => d.name).join(", ");
+    askConfirm({
+      title: `Delete ${picked.length} doctor${picked.length !== 1 ? "s" : ""}?`,
+      label: `${picked.length} doctor${picked.length !== 1 ? "s" : ""}`,
+      detail: `${names}${picked.length > 8 ? ` + ${picked.length - 8} more` : ""}. Their reminders stay, but the doctor cards are removed permanently.`,
+      confirmText: `Yes, delete ${picked.length}`,
+      onYes: () => {
+        setDoctors((prev) => prev.filter((x) => !selectedIds.has(x.id)));
+        setExpandedIds((prev) => {
+          const next = new Set(prev);
+          selectedIds.forEach((id) => next.delete(id));
+          return next;
+        });
+        closeConfirm();
+        exitSelectMode();
+        showToast(`${picked.length} doctor${picked.length !== 1 ? "s" : ""} deleted`);
+      },
+    });
+  };
   const [reminderModal, setReminderModal] = useState<{ open: boolean; draft: Reminder; editing: boolean }>({ open: false, draft: emptyReminder(), editing: false });
   const [paymentModal, setPaymentModal] = useState<{ open: boolean; draft: Payment; editing: boolean }>({ open: false, draft: emptyPayment(), editing: false });
   const [patchModal, setPatchModal] = useState(false);
@@ -1476,7 +1570,9 @@ export default function App() {
       showToast("Alarm sound on");
     }
   };
-  /* Silence + clear the whole ringing popup (fixes sound continuing after X) */
+  /* X button: hide popup AND stop sound together — guaranteed.
+     Runs stop twice (before + after state update) so even a tone scheduled
+     in the same tick is killed. */
   const skipAllRinging = () => {
     stopAlarmSound();
     setRinging((prev) => {
@@ -1486,6 +1582,9 @@ export default function App() {
       });
       return [];
     });
+    // Second pass catches anything scheduled between click and re-render
+    window.setTimeout(() => stopAlarmSound(), 0);
+    window.setTimeout(() => stopAlarmSound(), 250);
   };
 
   const enableAlerts = async () => {
@@ -1595,11 +1694,20 @@ export default function App() {
     }, 800);
     return () => window.clearTimeout(t);
   }, [reminders, doctors, payments, signedIn]);
+  /* Safety net: whenever the popup is gone for ANY reason, kill the sound.
+     This is what guarantees "hide = silence" even if data reloads. */
+  useEffect(() => {
+    if (ringing.length === 0) stopAlarmSound();
+  }, [ringing.length]);
+  /* Stop sound if the component unmounts (navigation / logout) */
+  useEffect(() => () => stopAlarmSound(), []);
+
   const snoozeReminder = (id: string, mins = 10) => {
     stopAlarmSound();
     snoozedRef.current.set(id, Date.now() + mins * 60000);
     dismissedRef.current.delete(id);
     setRinging((prev) => prev.filter((x) => x.id !== id));
+    window.setTimeout(() => stopAlarmSound(), 0);
     showToast(`Snoozed for ${mins} min`, "info");
   };
   const dismissRinging = (id: string) => {
@@ -1607,6 +1715,7 @@ export default function App() {
     dismissedRef.current.add(id);
     if (id.startsWith("morning-")) markMorningFired(dataOwnerKey, id.slice("morning-".length));
     setRinging((prev) => prev.filter((x) => x.id !== id));
+    window.setTimeout(() => stopAlarmSound(), 0);
   };
   const completeRinging = (r: Reminder) => {
     stopAlarmSound();
@@ -1615,6 +1724,7 @@ export default function App() {
     if (r.id.startsWith("morning-")) markMorningFired(dataOwnerKey, r.date);
     else setReminders((prev) => prev.map((x) => (x.id === r.id ? { ...x, done: true } : x)));
     setRinging((prev) => prev.filter((x) => x.id !== r.id));
+    window.setTimeout(() => stopAlarmSound(), 0);
     showToast(r.id.startsWith("morning-") ? "Morning briefing done — have a great day!" : "Reminder completed");
   };
 
@@ -1637,9 +1747,16 @@ export default function App() {
           if (dismissedRef.current.has(r.id)) continue;
           if (!ringingIds.has(r.id)) fresh.push(r);
         }
+        /* Popup must NEVER auto-hide on cloud reload: only drop a ringing item
+           when its reminder is explicitly marked done. A missing id means the
+           list reloaded (owner switch / sync) — keep the popup visible instead
+           of hiding it while the sound keeps playing in the background. */
         const alive = prev.filter((x) => {
+          if (dismissedRef.current.has(x.id)) return false;
           const cur = reminders.find((rr) => rr.id === x.id);
-          return cur && !cur.done;
+          if (x.id.startsWith("morning-")) return true;
+          if (!cur) return true;
+          return !cur.done;
         });
         if (fresh.length > 0) {
           playAlarmSound(3, alarmSound);
@@ -2014,6 +2131,7 @@ export default function App() {
       if (specFilter !== "All" && d.specialty !== specFilter) return false;
       if (productFilter !== "All" && !(d.focusProducts || []).includes(productFilter) && !(d.followProducts || []).includes(productFilter)) return false;
       if (apptFilter !== "All" && !(d.appointmentModes || []).includes(apptFilter)) return false;
+      if (gradeFilter !== "All" && doctorGrade(d) !== gradeFilter) return false;
       if (patchFilter === "none" && d.patchId) return false;
       if (patchFilter !== "all" && patchFilter !== "none" && d.patchId !== patchFilter) return false;
       if (callsTodayOnly && !doctorCallsOn(d, new Date())) return false;
@@ -2022,7 +2140,7 @@ export default function App() {
       return [d.name, d.specialty, d.area, d.city, d.clinic, d.phone, patchName, describeWeekly(d.callDays || []), (d.monthlyCalls || []).join(" "), (d.focusProducts || []).join(" "), (d.followProducts || []).join(" "), (d.appointmentModes || []).join(" "), d.appointmentContact || "", d.appointmentPhone || "", d.appointmentNote || ""].join(" ").toLowerCase().includes(q);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doctors, search, specFilter, productFilter, apptFilter, patchFilter, callsTodayOnly, patches]);
+  }, [doctors, search, specFilter, productFilter, apptFilter, gradeFilter, patchFilter, callsTodayOnly, patches]);
 
   const filteredReminders = useMemo(() => {
     const t = todayISO();
@@ -2140,6 +2258,72 @@ export default function App() {
     showToast(doctorModal.editing ? "Doctor updated" : "Doctor added to patch");
   };
 
+  /* Bulk upload: CSV rows → doctors. Matches area names to existing patches
+     (case-insensitive); brand-new areas auto-create their patch so the
+     Area-patches filter stays correct. Skips exact name+phone duplicates. */
+  const importDoctorsBulk = (parsed: ParsedDoctor[]) => {
+    if (!parsed || parsed.length === 0) return;
+    const patchByName = new Map(patches.map((p) => [p.name.trim().toLowerCase(), p]));
+    const newPatches: Patch[] = [];
+    const fresh: Doctor[] = [];
+    let skipped = 0;
+    const seen = new Set(doctors.map((d) => `${d.name.trim().toLowerCase()}|${(d.phone || "").replace(/\D/g, "")}`));
+    for (const pd of parsed) {
+      const area = (pd.area || "").trim();
+      let patchId = "";
+      if (area) {
+        const hit = patchByName.get(area.toLowerCase());
+        if (hit) patchId = hit.id;
+        else {
+          const created: Patch = { id: uid(), name: area, color: "emerald" };
+          patchByName.set(area.toLowerCase(), created);
+          newPatches.push(created);
+          patchId = created.id;
+        }
+      }
+      const dupKey = `${pd.name.trim().toLowerCase()}|${(pd.phone || "").replace(/\D/g, "")}`;
+      if (seen.has(dupKey)) { skipped++; continue; }
+      seen.add(dupKey);
+      fresh.push({
+        id: uid(),
+        name: pd.name.trim(),
+        specialty: pd.specialty || "Dermatologist",
+        qualification: pd.qualification || "",
+        clinic: pd.clinic || "",
+        area,
+        patchId,
+        city: pd.city || "Bangalore",
+        phone: pd.phone || "",
+        email: pd.email || "",
+        frequency: pd.frequency || "Weekly",
+        lastVisit: pd.lastVisit || "",
+        nextVisit: pd.nextVisit || "",
+        notes: pd.notes || "",
+        priority: pd.priority || "Medium",
+        callDays: pd.callDays?.length ? pd.callDays : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+        monthlyCalls: pd.monthlyCalls || [],
+        callTimeFrom: pd.callTimeFrom || "10:00",
+        callTimeTo: pd.callTimeTo || "13:00",
+        focusProducts: pd.focusProducts || [],
+        followProducts: pd.followProducts || [],
+        appointmentModes: pd.appointmentModes || [],
+        appointmentContact: pd.appointmentContact || "",
+        appointmentPhone: pd.appointmentPhone || "",
+        appointmentLead: pd.appointmentLead || "Same day",
+        appointmentNote: pd.appointmentNote || "",
+      });
+    }
+    if (newPatches.length > 0) setPatches((prev) => [...prev, ...newPatches]);
+    if (fresh.length > 0) setDoctors((prev) => [...fresh, ...prev]);
+    setDoctorImportOpen(false);
+    showToast(
+      fresh.length > 0
+        ? `Imported ${fresh.length} doctor${fresh.length !== 1 ? "s" : ""}${newPatches.length > 0 ? ` · ${newPatches.length} new patch${newPatches.length !== 1 ? "es" : ""}` : ""}${skipped > 0 ? ` · ${skipped} duplicate${skipped !== 1 ? "s" : ""} skipped` : ""}`
+        : "Nothing imported — all rows were duplicates",
+      fresh.length > 0 ? "ok" : "info"
+    );
+  };
+
   const toggleCallDay = (day: string) => {
     setDoctorModal((m) => {
       const has = (m.draft.callDays || []).includes(day);
@@ -2236,6 +2420,7 @@ export default function App() {
     else setReminders((prev) => [{ ...r, id: uid() }, ...prev]);
     dismissedRef.current.delete(r.id);
     snoozedRef.current.delete(r.id);
+    stopAlarmSound();
     setRinging((prev) => prev.filter((x) => x.id !== r.id));
     setReminderModal({ open: false, draft: emptyReminder(), editing: false });
     showToast(reminderModal.editing ? "Reminder updated" : "Reminder added");
@@ -3099,6 +3284,16 @@ export default function App() {
               <button onClick={exportDoctors} title={`Download ${filteredDoctors.length} doctors as CSV`} className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-extrabold text-emerald-800 shadow-sm transition hover:bg-emerald-100">
                 <Download className="h-4 w-4" /> Download <span className="rounded-full bg-emerald-700 px-2 py-0.5 text-[11px] text-white">{filteredDoctors.length}</span>
               </button>
+              <button onClick={() => setDoctorImportOpen(true)} title="Bulk upload doctors from CSV" className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-4 py-2 text-sm font-extrabold text-emerald-700 shadow-sm transition hover:bg-emerald-50">
+                <Upload className="h-4 w-4" /> Upload
+              </button>
+              <button
+                onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+                title="Select multiple doctors to delete"
+                className={`flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-extrabold shadow-sm transition ${selectMode ? "border-rose-300 bg-rose-600 text-white hover:bg-rose-700" : "border-slate-200 bg-white text-slate-600 hover:border-rose-200 hover:text-rose-700"}`}
+              >
+                {selectMode ? <X className="h-4 w-4" /> : <Check className="h-4 w-4" />} {selectMode ? "Cancel" : "Select"}
+              </button>
               <button onClick={() => openDoctorModal(false, emptyDoctor())} className="flex items-center gap-1.5 rounded-full bg-amber-400 px-5 py-2 text-sm font-extrabold text-amber-950 shadow-md shadow-amber-200 transition hover:bg-amber-300">
                 <Plus className="h-4 w-4" /> Add Doctor
               </button>
@@ -3132,6 +3327,30 @@ export default function App() {
                 <Plus className="h-3.5 w-3.5" /> Manage patches
               </button>
             </div>
+            {/* Grade filter — sits right under Area patches */}
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-200/70 pt-3">
+              <span className="flex items-center gap-1.5 px-1 text-xs font-extrabold uppercase tracking-widest text-slate-500">
+                <Target className="h-4 w-4 text-emerald-600" /> Grade
+              </span>
+              <button onClick={() => setGradeFilter("All")} className={`rounded-full px-3.5 py-1.5 text-xs font-extrabold transition ${gradeFilter === "All" ? "bg-emerald-700 text-white shadow" : "bg-white text-slate-500 ring-1 ring-slate-200 hover:text-emerald-700"}`}>
+                All · {doctors.length}
+              </button>
+              {(["A", "B", "C"] as Grade[]).map((g) => {
+                const count = doctors.filter((d) => doctorGrade(d) === g).length;
+                const active = gradeFilter === g;
+                return (
+                  <button
+                    key={g}
+                    onClick={() => setGradeFilter(active ? "All" : g)}
+                    title={`Grade ${g} — ${GRADE_VISITS[g]} visit${GRADE_VISITS[g] > 1 ? "s" : ""} per month`}
+                    className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-extrabold transition ${active ? "border-emerald-600 bg-emerald-700 text-white shadow" : `${GRADE_STYLE[g]} hover:shadow`}`}
+                  >
+                    {g} · {GRADE_VISITS[g]} visit{GRADE_VISITS[g] > 1 ? "s" : ""} · {count}
+                  </button>
+                );
+              })}
+            </div>
+
             <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-200/70 pt-3">
               <button onClick={() => setCallsTodayOnly(!callsTodayOnly)} className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-extrabold ring-1 transition ${callsTodayOnly ? "bg-emerald-700 text-white ring-emerald-700 shadow" : "bg-white text-slate-600 ring-slate-200 hover:ring-emerald-300 hover:text-emerald-700"}`}>
                 <CalendarClock className="h-3.5 w-3.5" /> {callsTodayOnly ? "Showing: calls today ✕" : `Calls today · ${callsTodayList.length}`}
@@ -3146,8 +3365,8 @@ export default function App() {
                   <CalendarDays className="h-3.5 w-3.5 shrink-0" /> <span className="max-w-[220px] truncate">{apptFilter}</span> ✕
                 </button>
               )}
-              {(patchFilter !== "all" || callsTodayOnly || specFilter !== "All" || productFilter !== "All" || apptFilter !== "All" || search) && (
-                <button onClick={() => { setPatchFilter("all"); setCallsTodayOnly(false); setSpecFilter("All"); setProductFilter("All"); setApptFilter("All"); setSearch(""); }} className="rounded-full px-3 py-1.5 text-xs font-bold text-slate-400 underline-offset-2 hover:text-rose-600 hover:underline">
+              {(patchFilter !== "all" || callsTodayOnly || specFilter !== "All" || productFilter !== "All" || apptFilter !== "All" || gradeFilter !== "All" || search) && (
+                <button onClick={() => { setPatchFilter("all"); setCallsTodayOnly(false); setSpecFilter("All"); setProductFilter("All"); setApptFilter("All"); setGradeFilter("All"); setSearch(""); }} className="rounded-full px-3 py-1.5 text-xs font-bold text-slate-400 underline-offset-2 hover:text-rose-600 hover:underline">
                   Clear all filters
                 </button>
               )}
@@ -3180,6 +3399,32 @@ export default function App() {
             </div>
           </div>
 
+          {/* Red action bar — only while selecting */}
+          {selectMode && (
+            <div className="sticky top-16 z-30 mt-4 flex flex-wrap items-center gap-2 rounded-2xl bg-rose-600 px-4 py-3 text-white shadow-lg shadow-rose-200">
+              <span className="text-sm font-extrabold">{selectedIds.size} selected</span>
+              <button
+                onClick={() => setSelectedIds(new Set(filteredDoctors.map((d) => d.id)))}
+                className="rounded-full bg-white/15 px-3 py-1.5 text-xs font-extrabold text-white transition hover:bg-white/25"
+              >
+                Select all ({filteredDoctors.length})
+              </button>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="rounded-full bg-white/15 px-3 py-1.5 text-xs font-extrabold text-white transition hover:bg-white/25"
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => deleteSelectedDoctors()}
+                disabled={selectedIds.size === 0}
+                className="ml-auto flex items-center gap-1.5 rounded-full bg-white px-4 py-1.5 text-xs font-extrabold text-rose-700 shadow transition hover:bg-rose-50 disabled:opacity-40"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Delete {selectedIds.size || ""}
+              </button>
+            </div>
+          )}
+
           {filteredDoctors.length === 0 ? (
             <div className="mt-5 rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
               <Stethoscope className="mx-auto h-10 w-10 text-slate-300" />
@@ -3194,12 +3439,25 @@ export default function App() {
                 const ps = patchStyles(p?.color || "emerald");
                 const givesToday = doctorCallsOn(d, new Date());
                 const next = nextCallDate(d);
+                const open = expandedIds.has(d.id);
+                const picked = selectedIds.has(d.id);
+                const grade = doctorGrade(d);
                 return (
-                  <article key={d.id} className="group flex flex-col rounded-3xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-emerald-200 hover:shadow-lg hover:shadow-emerald-100/50">
+                  <article
+                    key={d.id}
+                    onClick={() => (selectMode ? toggleSelected(d.id) : toggleExpanded(d.id))}
+                    className={`group flex cursor-pointer flex-col rounded-3xl border bg-white p-5 shadow-sm transition hover:shadow-lg hover:shadow-emerald-100/50 ${picked ? "border-rose-400 ring-2 ring-rose-200" : "border-slate-200 hover:border-emerald-200"}`}
+                  >
                     <div className="flex items-start gap-3">
-                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-700 font-extrabold text-white">
-                        {initials(d.name)}
-                      </div>
+                      {selectMode ? (
+                        <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border-2 transition ${picked ? "border-rose-600 bg-rose-600 text-white" : "border-slate-300 bg-white text-transparent"}`}>
+                          <Check className="h-6 w-6" strokeWidth={3} />
+                        </div>
+                      ) : (
+                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-700 font-extrabold text-white">
+                          {initials(d.name)}
+                        </div>
+                      )}
                       <div className="min-w-0 flex-1">
                         <h3 className="truncate text-[16px] font-extrabold text-slate-900">{d.name}</h3>
                         <p className="mt-0.5 flex items-center gap-1.5 text-[13px] font-semibold text-emerald-700">
@@ -3214,9 +3472,17 @@ export default function App() {
                           ) : (
                             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-extrabold text-slate-500">{d.area || "No patch"}</span>
                           )}
+                          <span title={`Grade ${grade} · ${GRADE_VISITS[grade]} visit${GRADE_VISITS[grade] > 1 ? "s" : ""}/month`} className={`rounded-full border px-2 py-0.5 text-[11px] font-extrabold ${GRADE_STYLE[grade]}`}>
+                            {grade} · {GRADE_VISITS[grade]}v
+                          </span>
                           {d.priority === "High" && <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-extrabold text-rose-600 ring-1 ring-rose-100">High priority</span>}
                         </div>
                       </div>
+                      {!selectMode && (
+                        <span className={`mt-1 shrink-0 rounded-full bg-slate-100 p-1.5 text-slate-500 transition ${open ? "rotate-180" : ""}`} aria-hidden="true">
+                          <ChevronDown className="h-4 w-4" />
+                        </span>
+                      )}
                     </div>
 
                     <div className="mt-3 space-y-1.5 text-[13px] font-medium text-slate-600">
@@ -3225,6 +3491,14 @@ export default function App() {
                       <p className="flex items-center gap-2"><Phone className="h-3.5 w-3.5 shrink-0 text-slate-400" /> {d.phone || "—"}</p>
                     </div>
 
+                    {!open && !selectMode && (
+                      <p className="mt-3 flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest text-emerald-700">
+                        <ChevronDown className="h-3.5 w-3.5" /> Tap for full details
+                      </p>
+                    )}
+
+                    {open && !selectMode && (
+                    <div onClick={(e) => e.stopPropagation()} className="cursor-default">
                     {/* call schedule block */}
                     <div className={`mt-3 rounded-2xl border p-3 ${givesToday ? "border-emerald-300 bg-emerald-50/60" : "border-slate-200 bg-slate-50/70"}`}>
                       <div className="flex items-center justify-between gap-2">
@@ -3314,6 +3588,8 @@ export default function App() {
                     )}
 
                     {d.notes && <p className="mt-3 line-clamp-2 rounded-xl bg-slate-50 px-3 py-2 text-xs font-medium leading-relaxed text-slate-500">{d.notes}</p>}
+                    </div>
+                    )}
 
                     <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-bold">
                       {(() => {
@@ -3345,7 +3621,8 @@ export default function App() {
                       })()}
                     </div>
 
-                    <div className="mt-4 flex items-center gap-2 border-t border-slate-100 pt-3">
+                    {!selectMode && (
+                    <div onClick={(e) => e.stopPropagation()} className="mt-4 flex cursor-default items-center gap-2 border-t border-slate-100 pt-3">
                       <button onClick={() => markVisitDone(d)} className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-emerald-700 px-3 py-2 text-xs font-extrabold text-white transition hover:bg-emerald-800">
                         <Check className="h-3.5 w-3.5" /> Visit Done
                       </button>
@@ -3353,6 +3630,7 @@ export default function App() {
                       <IconBtn title="Edit" onClick={() => openDoctorModal(true, { ...d, callDays: [...(d.callDays || [])], monthlyCalls: [...(d.monthlyCalls || [])], focusProducts: [...(d.focusProducts || [])], followProducts: [...(d.followProducts || [])], appointmentModes: [...(d.appointmentModes || [])] })}><Pencil className="h-4 w-4" /></IconBtn>
                       <IconBtn title="Delete" danger onClick={() => deleteDoctor(d)}><Trash2 className="h-4 w-4" /></IconBtn>
                     </div>
+                    )}
                   </article>
                 );
               })}
@@ -4193,7 +4471,7 @@ export default function App() {
                   </div>
                 </div>
                 <p className="flex items-start gap-1.5 text-[11px] font-semibold leading-relaxed text-slate-500">
-                  <Lock className="mt-0.5 h-3 w-3 shrink-0" /> Locked — built into the app. The URL and key always stay the same and can't be edited.
+                  <Lock className="mt-0.5 h-3 w-3 shrink-0" /> Locked — built into the app{(typeof process !== "undefined" && process.env?.NEXT_PUBLIC_SUPABASE_URL) ? " via Vercel env vars (NEXT_PUBLIC_SUPABASE_URL + KEY)" : ""}. To move projects, set those Vercel env vars and redeploy — no code change needed.
                 </p>
               </div>
 
@@ -4484,6 +4762,11 @@ export default function App() {
         </Modal>
       )}
 
+      {/* --------------------------- doctor bulk-upload --------------------------- */}
+      {doctorImportOpen && (
+        <DoctorImportDialog onClose={() => setDoctorImportOpen(false)} onImport={importDoctorsBulk} />
+      )}
+
       {/* ------------------------------- patch modal ------------------------------ */}
       {patchModal && (
         <Modal title="Manage Area Patches" wide onClose={() => setPatchModal(false)}>
@@ -4718,10 +5001,12 @@ export default function App() {
         </Modal>
       )}
 
-      {/* ---------- Reminder alarm: ringing overlay ---------- */}
+      {/* ---------- Reminder alarm: ringing overlay ----------
+          Stays until Done / Snooze / Dismiss / X. Backdrop click does nothing
+          on purpose (prevents accidental hide). X = hide + stop sound. */}
       {ringing.length > 0 && (
-        <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/60 p-4 backdrop-blur-sm sm:items-center">
-          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+        <div role="alertdialog" aria-label="Reminder alarm" className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/60 p-4 backdrop-blur-sm sm:items-center">
+          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl ring-1 ring-amber-300">
             <div className="bg-gradient-to-r from-amber-400 to-orange-400 px-6 py-5 text-amber-950">
               <div className="flex items-center gap-3">
                 <div className="anim-ring flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/90 shadow">
@@ -4729,7 +5014,7 @@ export default function App() {
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="text-lg font-extrabold leading-tight">Reminder alarm!</p>
-                  <p className="text-xs font-bold opacity-80">{ringing.length} task{ringing.length > 1 ? "s" : ""} due now</p>
+                  <p className="text-xs font-bold opacity-80">{ringing.length} task{ringing.length > 1 ? "s" : ""} due now · stays until you act</p>
                 </div>
                 <button onClick={() => playAlarmSound(2, alarmSound, true)} title="Replay sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/90 text-amber-700 shadow transition hover:bg-white">
                   <RefreshCcw className="h-5 w-5" />
@@ -4737,8 +5022,8 @@ export default function App() {
                 <button onClick={toggleMuted} title={muted ? "Unmute alarm sound" : "Mute alarm sound"} aria-label={muted ? "Unmute alarm sound" : "Mute alarm sound"} className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full shadow transition ${muted ? "bg-slate-900 text-white hover:bg-slate-700" : "bg-white/90 text-amber-700 hover:bg-white"}`}>
                   {muted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
                 </button>
-                <button onClick={skipAllRinging} title="Skip alarm" aria-label="Skip alarm" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
-                  <X className="h-5 w-5" />
+                <button onClick={skipAllRinging} title="Close + stop sound" aria-label="Close alarm and stop sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
+                  <X className="h-5 w-5" strokeWidth={3} />
                 </button>
               </div>
             </div>
