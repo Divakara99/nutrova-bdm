@@ -208,7 +208,7 @@ export function readConfig(): BackendConfig {
     /* ignore */
   }
   try {
-    /* older share links carried a connection in the address (#cfg=��) — ignore it and tidy the address */
+    /* older share links carried a connection in the address (#cfg=…) — ignore it and tidy the address */
     if (/cfg=/.test(window.location.hash)) {
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
