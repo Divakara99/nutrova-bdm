@@ -243,14 +243,29 @@ export interface ParsedDoctor {
 }
 
 export function parseDoctorsCSV(text: string): { doctors: ParsedDoctor[]; errors: string[] } {
-  const rows = parseCSV(text);
+  return rowsToDoctors(parseCSV(text));
+}
+
+/* Shared mapper used by BOTH CSV and Excel (.xlsx/.xls) imports, so the two
+   paths can never drift apart. Takes a plain grid of cells. */
+export function rowsToDoctors(grid: string[][]): { doctors: ParsedDoctor[]; errors: string[] } {
+  // Excel exports often start with blank/title rows — find the real header:
+  // the first row that actually contains a Name-like column.
+  let startAt = 0;
+  for (let i = 0; i < Math.min(grid.length, 10); i++) {
+    if (colIndex(grid[i] || [], ["name", "doctor name", "dr name", "doctor"]) >= 0) {
+      startAt = i;
+      break;
+    }
+  }
+  const rows = grid.slice(startAt);
   const errors: string[] = [];
   if (rows.length < 2) {
-    return { doctors: [], errors: ["CSV is empty — add a header row + at least 1 doctor row."] };
+    return { doctors: [], errors: ["File is empty — add a header row + at least 1 doctor row."] };
   }
   const header = rows[0];
   const idx = {
-    name: colIndex(header, ["name", "doctor name", "dr name"]),
+    name: colIndex(header, ["name", "doctor name", "dr name", "doctor"]),
     specialty: colIndex(header, ["specialty", "speciality"]),
     qualification: colIndex(header, ["qualification", "degree"]),
     clinic: colIndex(header, ["clinic", "hospital", "centre", "center"]),
@@ -275,7 +290,13 @@ export function parseDoctorsCSV(text: string): { doctors: ParsedDoctor[]; errors
     notes: colIndex(header, ["notes", "remarks"]),
   };
   if (idx.name < 0) {
-    return { doctors: [], errors: ['No "Name" column found. Download the template to see the expected format.'] };
+    const seen = header.filter(Boolean).slice(0, 8).join(", ");
+    return {
+      doctors: [],
+      errors: [
+        `No "Name" column found.${seen ? ` Columns detected: ${seen}.` : ""} Make sure the first row has a column called Name.`,
+      ],
+    };
   }
   const get = (r: string[], i: number) => (i >= 0 && i < r.length ? String(r[i] ?? "").trim() : "");
   const doctors: ParsedDoctor[] = [];
@@ -336,13 +357,37 @@ export function DoctorImportDialog({
     setBusy(true);
     setFileName(f.name);
     try {
-      const text = await f.text();
-      const { doctors, errors } = parseDoctorsCSV(text);
-      setParsed(doctors);
-      setErrors(errors);
+      const isExcel = /\.(xlsx|xlsm|xlsb|xls)$/i.test(f.name);
+      let result: { doctors: ParsedDoctor[]; errors: string[] };
+      if (isExcel) {
+        // Excel files are binary — reading them as text produces garbage,
+        // which is why an .xlsx used to report "No Name column found".
+        const XLSX = await import("xlsx");
+        const buf = await f.arrayBuffer();
+        const wb = XLSX.read(buf, { type: "array" });
+        const sheetName = wb.SheetNames[0];
+        const sheet = sheetName ? wb.Sheets[sheetName] : undefined;
+        if (!sheet) {
+          setParsed([]);
+          setErrors(["This Excel file has no sheets."]);
+          return;
+        }
+        const grid = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+          header: 1,
+          blankrows: false,
+          defval: "",
+          raw: false,
+        });
+        const cells: string[][] = grid.map((r) => (Array.isArray(r) ? r.map((c) => String(c ?? "").trim()) : []));
+        result = rowsToDoctors(cells.filter((r) => r.some((c) => c !== "")));
+      } else {
+        result = parseDoctorsCSV(await f.text());
+      }
+      setParsed(result.doctors);
+      setErrors(result.errors);
     } catch {
       setParsed([]);
-      setErrors(["Could not read this file — please upload a .csv file."]);
+      setErrors(["Could not read this file — please upload a .csv or .xlsx file."]);
     } finally {
       setBusy(false);
     }
@@ -361,7 +406,7 @@ export function DoctorImportDialog({
           <div>
             <h3 className="text-xl font-extrabold tracking-tight text-slate-900">Upload doctors</h3>
             <p className="mt-1 text-xs font-medium text-slate-500">
-              Bulk add from CSV — same columns as Download. Only Name is required.
+              Bulk add from Excel (.xlsx) or CSV — same columns as Download. Only Name is required.
             </p>
           </div>
           <button
@@ -387,13 +432,13 @@ export function DoctorImportDialog({
             onClick={() => fileRef.current?.click()}
             className="flex items-center justify-center gap-2 rounded-2xl bg-emerald-700 px-4 py-3 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800"
           >
-            <Upload className="h-4 w-4" /> 2. Choose CSV file
+            <Upload className="h-4 w-4" /> 2. Choose Excel / CSV file
           </button>
         </div>
         <input
           ref={fileRef}
           type="file"
-          accept=".csv,text/csv"
+          accept=".csv,.xlsx,.xlsm,.xlsb,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
           className="hidden"
           onChange={(e) => handleFile(e.target.files?.[0])}
         />
