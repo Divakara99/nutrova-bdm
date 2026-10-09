@@ -36,6 +36,7 @@ import {
   Settings as SettingsIcon,
   Share2,
   Smartphone,
+  Sparkles,
   Stethoscope,
   Target,
   Trash2,
@@ -50,6 +51,7 @@ import {
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { DoctorImportDialog, type ParsedDoctor } from "./doctor-import";
+import { AiCopilot } from "./ai-copilot";
 import {
   SETUP_SQL,
   adoptRecoverySession,
@@ -871,7 +873,7 @@ const KIND_COLORS: Record<ReminderKind, string> = {
 
 /* ---------------------------------- app ---------------------------------- */
 
-type Tab = "dashboard" | "doctors" | "reminders" | "payments" | "bio" | "settings" | "users";
+type Tab = "dashboard" | "doctors" | "reminders" | "payments" | "ai" | "bio" | "settings" | "users";
 
 interface TeamMember {
   userId: string;
@@ -2996,13 +2998,15 @@ export default function App() {
     );
   }
 
-  const navItems: { id: Tab; label: string }[] = [
+  const navItems: { id: Tab; label: string; icon?: ReactNode }[] = [
     { id: "dashboard", label: "Dashboard" },
+    { id: "ai", label: "AI Copilot", icon: <Sparkles className="h-3.5 w-3.5 text-amber-500" /> },
   ];
   const drawerItems: { id: Tab; label: string; icon: ReactNode }[] = [
     { id: "doctors", label: "Doctors", icon: <Stethoscope className="h-5 w-5" /> },
     { id: "reminders", label: "Reminders", icon: <Bell className="h-5 w-5" /> },
     { id: "payments", label: "Payments", icon: <Wallet className="h-5 w-5" /> },
+    { id: "ai", label: "AI Copilot", icon: <Sparkles className="h-5 w-5 text-amber-500" /> },
     { id: "settings", label: "Settings", icon: <SettingsIcon className="h-5 w-5" /> },
     ...(isOwner ? [{ id: "users" as Tab, label: "Users", icon: <Users className="h-5 w-5" /> }] : []),
   ];
@@ -3050,12 +3054,13 @@ export default function App() {
               <button
                 key={n.id}
                 onClick={() => goTo(n.id)}
-                className={`shrink-0 rounded-full px-5 py-2 text-sm font-bold transition ${
+                className={`flex shrink-0 items-center gap-1.5 rounded-full px-4 sm:px-5 py-2 text-sm font-bold transition ${
                   activeTab === n.id
                     ? "bg-emerald-700 text-white shadow-md shadow-emerald-200"
                     : "bg-slate-100 text-slate-600 hover:bg-emerald-50 hover:text-emerald-800"
                 }`}
               >
+                {n.icon}
                 {n.label}
               </button>
             ))}
@@ -3110,6 +3115,9 @@ export default function App() {
                   {d.id === "payments" && (
                     <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-extrabold ${activeTab === d.id ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{pendingPayments.length}</span>
                   )}
+                  {d.id === "ai" && (
+                    <span className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-800">Free AI</span>
+                  )}
                   {d.id === "users" && (
                     <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-extrabold ${activeTab === d.id ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{teamLoading ? "…" : teamRoster.length}</span>
                   )}
@@ -3125,7 +3133,7 @@ export default function App() {
         </div>
       )}
 
-      <main className="mx-auto max-w-7xl px-5 py-8 sm:px-8">
+      <main className="mx-auto max-w-7xl px-5 py-8 sm:px-8 pb-32 sm:pb-40">
         {/* online store status banner — only shown when something needs attention */}
         {online && syncState === "loading" && (
           <p className="mb-5 flex items-center gap-2.5 rounded-2xl bg-slate-50 px-4 py-3 text-xs font-bold text-slate-600 ring-1 ring-slate-200">
@@ -4073,6 +4081,11 @@ export default function App() {
         </section>
         )}
 
+        {/* -------------------------------- AI Copilot ------------------------------- */}
+        {activeTab === "ai" && (
+          <AiCopilot doctors={doctors} onToast={showToast} />
+        )}
+
         {/* -------------------------------- users (owner only) ------------------------------- */}
         {activeTab === "users" && (
         <section id="users" key="tab-users" className="anim-fade-up">
@@ -4396,6 +4409,17 @@ export default function App() {
                   <ChevronRight className="h-5 w-5 shrink-0 text-slate-300" />
                 </button>
                 )}
+                <button onClick={() => goTo("ai")} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 text-left transition hover:border-emerald-300 hover:bg-emerald-50/50">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-800"><Sparkles className="h-5 w-5" /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-2 text-sm font-extrabold text-slate-900">
+                      AI Copilot
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-emerald-800">Free Gemini</span>
+                    </span>
+                    <span className="block text-xs font-medium text-slate-500">Clinical pitches, WhatsApp drafts &amp; objection handling</span>
+                  </span>
+                  <ChevronRight className="h-5 w-5 shrink-0 text-slate-300" />
+                </button>
                 <button onClick={() => setShareOpen(true)} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 text-left transition hover:border-amber-300 hover:bg-amber-50/50">
                   <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-800"><Share2 className="h-5 w-5" /></span>
                   <span className="min-w-0 flex-1">
@@ -4683,20 +4707,16 @@ export default function App() {
         )}
       </main>
 
-      {/* --------------------------------- footer --------------------------------- */}
-      <footer className="mt-12 bg-emerald-950 text-white">
-        <div className="mx-auto grid max-w-7xl grid-cols-1 gap-6 px-5 py-8 sm:px-8 md:grid-cols-3">
+      {/* --------------------------------- footer (dragged down with generous spacing, territory summary removed) --------------------------------- */}
+      <footer className="mt-24 sm:mt-32 bg-emerald-950 text-white">
+        <div className="mx-auto flex max-w-7xl flex-col sm:flex-row items-center justify-between gap-4 px-5 py-8 sm:px-8">
           <div>
             <p className="flex items-center gap-2 text-base font-extrabold"><Stethoscope className="h-5 w-5 text-emerald-300" /> Nutrova Doctor Tracker</p>
-            <p className="mt-1.5 text-sm text-emerald-100/70">App created by {APP_OWNER.name} · {APP_OWNER.role} · {APP_OWNER.hq} HQ</p>
+            <p className="mt-1 text-sm text-emerald-100/70">App created by <span className="font-extrabold text-amber-300">{APP_OWNER.name}</span> · {APP_OWNER.role} · {APP_OWNER.hq} HQ</p>
           </div>
-          <div className="text-sm">
-            <p className="text-xs font-extrabold uppercase tracking-widest text-emerald-300/70">Territory summary</p>
-            <p className="mt-1.5 font-medium text-emerald-50">{doctors.length} doctors · {patches.length} patches · {callsTodayList.length} calls today · {inr(pendingTotal)} pending</p>
-          </div>
-          <div className="text-sm md:text-right">
+          <div className="text-sm sm:text-right">
             <p className="text-xs font-extrabold uppercase tracking-widest text-emerald-300/70">Contact</p>
-            <p className="mt-1.5 font-medium text-emerald-50"><a className="underline underline-offset-2 hover:text-emerald-200" href={`mailto:${APP_OWNER.email}`}>{APP_OWNER.email}</a></p>
+            <p className="mt-1 font-medium text-emerald-50"><a className="underline underline-offset-2 hover:text-emerald-200" href={`mailto:${APP_OWNER.email}`}>{APP_OWNER.email}</a></p>
           </div>
         </div>
         <div className="border-t border-white/10 py-4 text-center text-xs font-medium text-emerald-100/50">
