@@ -77,6 +77,30 @@ html {
   scroll-behavior: auto;
 }
 
+/* FORM CONTROLS AND MEDIA CAN NEVER BE WIDER THAN THEIR BOX.
+   A <select>'s intrinsic min-content width is its LONGEST option, and flex/grid
+   items default to min-width:auto — so a long option name (e.g. a full product
+   or doctor name) made the control refuse to shrink. That pushed cards past the
+   viewport on the AI Copilot screen, where the right-hand side looked chopped
+   off. This caps every control (and every image/svg/video) at its container
+   width, so no single long label can widen the page again. */
+select,
+input,
+textarea,
+button,
+img,
+svg,
+video,
+canvas {
+  max-width: 100%;
+}
+
+select,
+input,
+textarea {
+  min-width: 0;
+}
+
 /* Never let the PAGE scroll sideways.
    One unbreakable run of text (or a wide table) used to widen the document, and
    on a phone that shifted everything left so the header, body and footer all
