@@ -121,7 +121,11 @@ function friendly(msg: string): string {
   return m || "Online store error";
 }
 const finalError = (msg: string) =>
-  isKeyError(msg) ? "The online store rejected the key — check it in Setup" : friendly(msg);
+  msg === SESSION_EXPIRED
+    ? SESSION_EXPIRED
+    : isKeyError(msg)
+      ? "The online store rejected the key — check it in Setup"
+      : friendly(msg);
 
 /* ------------------------------- clients ------------------------------- */
 const clients = new Map<string, SupabaseClient>();
@@ -136,9 +140,21 @@ function clientFor(url: string, key: string): SupabaseClient {
       // taking a user straight into an existing signed-in session.
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
     });
+    // Supabase rotates refresh tokens; keep our backup copy current so a reload
+    // never restores an already-used (revoked) refresh token.
+    c.auth.onAuthStateChange((event, s) => {
+      if ((event === "TOKEN_REFRESHED" || event === "SIGNED_IN") && s?.access_token && s.refresh_token) {
+        toSession(s, s.user, loadSession()?.name || "");
+      }
+    });
     clients.set(id, c);
   }
   return c;
+}
+
+export const SESSION_EXPIRED = "Your login expired — please sign in again";
+export function isSessionError(msg: string): boolean {
+  return /refresh token|session expired|session missing|not signed in|jwt expired|invalid jwt/i.test(msg || "");
 }
 
 type Ready = { ok: true; client: SupabaseClient; userId: string } | { ok: false; error: string };
@@ -155,10 +171,22 @@ async function ready(c: SupabaseClient): Promise<Ready> {
   if (!mine) return { ok: false, error: "Not signed in" };
   try {
     const r = await c.auth.setSession({ access_token: mine.access_token, refresh_token: mine.refresh_token });
-    if (r.error || !r.data.session) return { ok: false, error: r.error?.message || "Session expired" };
+    if (r.error || !r.data.session) {
+      const msg = r.error?.message || "Session expired";
+      if (isSessionError(msg)) {
+        clearSession();
+        return { ok: false, error: SESSION_EXPIRED };
+      }
+      return { ok: false, error: msg };
+    }
     return { ok: true, client: c, userId: r.data.session.user?.id || "" };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : "Session expired" };
+    const msg = e instanceof Error ? e.message : "Session expired";
+    if (isSessionError(msg)) {
+      clearSession();
+      return { ok: false, error: SESSION_EXPIRED };
+    }
+    return { ok: false, error: msg };
   }
 }
 
