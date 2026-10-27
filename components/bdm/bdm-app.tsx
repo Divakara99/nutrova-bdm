@@ -539,6 +539,10 @@ interface SyncCtx {
 }
 const STORE_KEYS = ["nutrova-bio-v1", "nutrova-doctors-v3", "nutrova-patches-v2", "nutrova-reminders-v1", "nutrova-payments-v3"];
 
+/* Dashboard area-patches summary: remember whether the owner expanded it. */
+const PATCH_SUMMARY_KEY = "nutrova-patch-summary-open-v1";
+const PATCH_SUMMARY_PREVIEW = 3;
+
 /* Remove every cached dataset for every account on this device.
 
    useSynced() stores its offline copy under `${key}::${ownerKey}`, but
@@ -1545,6 +1549,25 @@ export default function App() {
   const [searchFocused, setSearchFocused] = useState(false);
   const [specFilter, setSpecFilter] = useState("All");
   const [patchFilter, setPatchFilter] = useState<string>("all");
+  /* Dashboard "area patches" summary: collapsed by default so 16 chips do not
+     eat ~500px of a phone screen. The choice is remembered per device. */
+  const [patchSummaryOpen, setPatchSummaryOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(PATCH_SUMMARY_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const togglePatchSummary = () =>
+    setPatchSummaryOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(PATCH_SUMMARY_KEY, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
   const [productFilter, setProductFilter] = useState("All");
   const [callsTodayOnly, setCallsTodayOnly] = useState(false);
   const [remFilter, setRemFilter] = useState<"all" | "today" | "upcoming" | "done">("all");
@@ -2335,6 +2358,15 @@ export default function App() {
 
   /* derived */
   const patchOf = (id: string) => patches.find((p) => p.id === id);
+  /* Busiest patches first, so the collapsed preview shows the ones that matter.
+     Counts stay live: they follow the doctor list. */
+  const sortedPatchChips = useMemo(
+    () =>
+      patches
+        .map((patch) => ({ patch, count: doctors.filter((d) => d.patchId === patch.id).length }))
+        .sort((a, b) => b.count - a.count || a.patch.name.localeCompare(b.patch.name)),
+    [patches, doctors]
+  );
   const doctorByName = (name: string) => doctors.find((d) => d.name.toLowerCase() === name.trim().toLowerCase());
   const todaysReminders = useMemo(() => reminders.filter((r) => isToday(r.date) && !r.done), [reminders]);
   const visitsToday = useMemo(() => doctors.filter((d) => isToday(d.nextVisit)), [doctors]);
@@ -3238,7 +3270,7 @@ export default function App() {
                 <Stethoscope className="h-5 w-5 sm:h-6 sm:w-6 text-emerald-300" />
               </div>
               <div className="min-w-0 flex-1">
-                <h1 className="font-extrabold leading-tight tracking-tight text-[17px] sm:text-2xl">
+                <h1 className="font-extrabold leading-tight tracking-tight text-[21px] sm:text-[26px]">
                   Nutrova Doctor Tracker
                 </h1>
                 {/* tagline — one idea per line on mobile so it never wraps raggedly.
@@ -3436,18 +3468,50 @@ export default function App() {
                   })}
                 </div>
               )}
-              {/* patch quick summary */}
-              <div className="mt-4 flex flex-wrap gap-2 border-t border-emerald-100 pt-4">
-                <span className="flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-widest text-slate-400"><Layers className="h-3.5 w-3.5" /> {patches.length} area patches</span>
-                {patches.map((p) => {
-                  const ps = patchStyles(p.color);
-                  const count = doctors.filter((d) => d.patchId === p.id).length;
-                  return (
-                    <button key={p.id} onClick={() => { setPatchFilter(p.id); goTo("doctors"); }} className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-bold transition hover:shadow ${ps.badge}`}>
-                      <span className={`h-2 w-2 rounded-full ${ps.dot}`} /> {p.name} · {count}
+              {/* patch quick summary — COLLAPSIBLE.
+                 All patches used to render as an always-open grid of chips, which
+                 cost ~500px of a phone screen and pushed payments/reminders below
+                 the fold. The heading was also a <span> inside the same flex-wrap
+                 row, so it sat inline with the first chip. Now the heading is the
+                 toggle (closed by default, 3 busiest patches + "+N more") and the
+                 choice is remembered on the device. */}
+              <div className="mt-4 border-t border-emerald-100 pt-4">
+                <button
+                  type="button"
+                  onClick={togglePatchSummary}
+                  aria-expanded={patchSummaryOpen}
+                  className="flex w-full items-center gap-1.5 text-xs font-extrabold uppercase tracking-widest text-slate-400 transition hover:text-emerald-700"
+                >
+                  <Layers className="h-3.5 w-3.5 shrink-0" />
+                  <span>{patches.length} area patches</span>
+                  <ChevronDown
+                    className={`ml-auto h-4 w-4 shrink-0 transition-transform ${patchSummaryOpen ? "rotate-180" : ""}`}
+                  />
+                </button>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {sortedPatchChips
+                    .slice(0, patchSummaryOpen ? sortedPatchChips.length : PATCH_SUMMARY_PREVIEW)
+                    .map(({ patch, count }) => {
+                      const ps = patchStyles(patch.color);
+                      return (
+                        <button
+                          key={patch.id}
+                          onClick={() => { setPatchFilter(patch.id); goTo("doctors"); }}
+                          className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-bold transition hover:shadow ${ps.badge}`}
+                        >
+                          <span className={`h-2 w-2 rounded-full ${ps.dot}`} /> {patch.name} · {count}
+                        </button>
+                      );
+                    })}
+                  {!patchSummaryOpen && sortedPatchChips.length > PATCH_SUMMARY_PREVIEW && (
+                    <button
+                      onClick={togglePatchSummary}
+                      className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-extrabold text-slate-500 transition hover:border-emerald-300 hover:text-emerald-700"
+                    >
+                      +{sortedPatchChips.length - PATCH_SUMMARY_PREVIEW} more
                     </button>
-                  );
-                })}
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -5143,41 +5207,28 @@ export default function App() {
       </main>
 
       {/* --------------------------------- footer (dragged down with generous spacing, territory summary removed) --------------------------------- */}
-      <footer className="mt-24 sm:mt-32 bg-emerald-950 text-white">
-        <div className="mx-auto flex w-full max-w-7xl flex-col items-center gap-6 px-5 py-8 text-center sm:flex-row sm:items-start sm:justify-between sm:gap-4 sm:px-8 sm:text-left">
-          <div className="min-w-0 max-w-full">
-            <p className="flex items-center justify-center gap-2 text-base font-extrabold sm:justify-start">
-              <Stethoscope className="h-5 w-5 shrink-0 text-emerald-300" /> Nutrova Doctor Tracker
-            </p>
-            {/* One idea per line: name, then role · HQ. Previously a single
-               unbreakable run wrapped into ragged 3-line blocks with the
-               "CONTACT" block indented to a random position on mobile. */}
-            <p className="mt-1.5 text-sm leading-relaxed text-emerald-100/70">
-              <span className="block">
-                App created by{" "}
-                <span className="font-extrabold text-amber-300">{APP_OWNER.name}</span>
-              </span>
-              <span className="block">
-                {APP_OWNER.role}
-                <span className="mx-1.5 text-emerald-300/60">·</span>
-                {APP_OWNER.hq} HQ
-              </span>
-            </p>
-          </div>
-          <div className="min-w-0 max-w-full text-sm sm:text-right">
-            <p className="text-xs font-extrabold uppercase tracking-widest text-emerald-300/70">Contact</p>
-            <p className="mt-1 font-medium text-emerald-50">
-              <a
-                className="break-words underline underline-offset-2 hover:text-emerald-200"
-                href={`mailto:${APP_OWNER.email}`}
-              >
-                {APP_OWNER.email}
-              </a>
-            </p>
-          </div>
-        </div>
-        <div className="border-t border-white/10 px-5 py-4 text-center text-xs leading-relaxed font-medium text-emerald-100/50">
-          Crafted for Nutrova · {APP_OWNER.hq} HQ · Online account data
+      {/* footer — deliberately THREE lines only, so it stops eating a phone
+          screen. Everything is centred at every width; the old version stacked
+          two separate blocks plus a "CONTACT" label plus a bottom bar, which
+          cost ~180px of scrolling for no information gain. */}
+      <footer className="mt-10 sm:mt-14 bg-emerald-950 text-white">
+        <div className="mx-auto w-full max-w-7xl px-5 py-5 text-center sm:px-8">
+          <p className="flex items-center justify-center gap-2 text-sm font-extrabold">
+            <Stethoscope className="h-4 w-4 shrink-0 text-emerald-300" /> Nutrova Doctor Tracker
+          </p>
+          <p className="mt-1 text-[11px] leading-snug text-emerald-100/70">
+            App created by <span className="font-extrabold text-amber-300">{APP_OWNER.name}</span>
+            <span className="mx-1 text-emerald-300/60">·</span>
+            {APP_OWNER.role}
+          </p>
+          <p className="mt-1 text-[11px] font-medium">
+            <a
+              className="break-words text-emerald-50 underline underline-offset-2 hover:text-emerald-200"
+              href={`mailto:${APP_OWNER.email}`}
+            >
+              {APP_OWNER.email}
+            </a>
+          </p>
         </div>
       </footer>
 
