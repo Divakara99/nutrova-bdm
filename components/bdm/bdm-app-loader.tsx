@@ -14,8 +14,24 @@
         - a 6s timer surfaces a visible "Reset & reload" escape hatch
         - an error boundary catches render crashes instead of hanging */
 
+import dynamic from "next/dynamic";
 import { Component, useEffect, useState, type ReactNode } from "react";
-import BdmApp from "./bdm-app";
+
+/* LAZY APP CHUNK — the reason the splash used to hang.
+   bdm-app.tsx alone compiles to ~1.9 MB and statically importing it meant the
+   splash could not hydrate until that chunk (plus ai-copilot, supabase-auth and
+   react-dom) had finished downloading. On a slow phone or a proxied preview the
+   page sat on "Loading your workspace…" for many seconds, the 6s timer flipped
+   on the scary "old cached files may be stuck" message, and the layout watchdog
+   then hard-reloaded — restarting the whole download in a loop.
+   Loading it dynamically renders and hydrates the splash from a tiny chunk, and
+   ssr:false is correct here because bdm-app reads localStorage inside its
+   useState initialisers (which is exactly the hydration mismatch this loader
+   was written to paper over). */
+const BdmApp = dynamic(() => import("./bdm-app"), {
+  ssr: false,
+  loading: () => <Splash />,
+});
 
 async function hardReset() {
   try {
@@ -116,7 +132,7 @@ export function BdmAppLoader() {
 
   useEffect(() => {
     if (mounted) return;
-    const t = window.setTimeout(() => setSlow(true), 6000);
+    const t = window.setTimeout(() => setSlow(true), 12000);
     return () => window.clearTimeout(t);
   }, [mounted]);
 
