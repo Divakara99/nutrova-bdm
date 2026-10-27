@@ -729,7 +729,7 @@ export function AiCopilot({
                 M DIVAKAR REDDY
               </h2>
               <span className="rounded-full bg-amber-400 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-emerald-950 shadow-sm">
-                BDM
+                Verified BDM Mentor
               </span>
             </div>
           </div>
