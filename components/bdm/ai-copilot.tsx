@@ -713,19 +713,19 @@ export function AiCopilot({
   };
 
   return (
-    <section className="anim-fade-up max-w-4xl mx-auto space-y-4">
+    <section className="anim-fade-up mx-auto w-full min-w-0 max-w-4xl space-y-4">
       {/* Clean M Divakar Reddy Header Card (Subtitles removed as marked) */}
       <div className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-850 text-white rounded-3xl p-5 sm:p-6 shadow-xl border border-emerald-700/50 relative overflow-hidden">
         <div className="absolute -right-8 -top-8 w-40 h-40 bg-amber-400/10 rounded-full blur-2xl pointer-events-none" />
 
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 relative z-10">
-          <div className="flex items-center gap-3.5">
+          <div className="flex min-w-0 items-center gap-3.5">
             <div className="h-12 w-12 sm:h-14 sm:w-14 rounded-2xl flex items-center justify-center shadow-lg border-2 border-amber-400/90 ring-4 ring-emerald-900/60 bg-gradient-to-tr from-amber-400 to-amber-500 text-emerald-950 font-black text-xl sm:text-2xl tracking-tight p-3 shrink-0">
               DR
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <h2 className="break-words text-xl font-black tracking-tight text-white sm:text-2xl">
                 M DIVAKAR REDDY
               </h2>
               <span className="rounded-full bg-amber-400 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-emerald-950 shadow-sm">
@@ -908,7 +908,7 @@ export function AiCopilot({
             <select
               value={selectedProduct}
               onChange={(e) => setSelectedProduct(e.target.value)}
-              className="w-full appearance-none rounded-2xl border border-emerald-300/80 bg-emerald-50/50 py-2.5 pl-3.5 pr-10 text-sm font-bold text-slate-900 shadow-sm outline-none focus:border-emerald-600 focus:bg-white truncate"
+              className="w-full min-w-0 max-w-full appearance-none truncate rounded-2xl border border-emerald-300/80 bg-emerald-50/50 py-2.5 pl-3.5 pr-10 text-sm font-bold text-slate-900 shadow-sm outline-none focus:border-emerald-600 focus:bg-white"
             >
               {NUTROVA_ALL_PRODUCTS.map((p) => (
                 <option key={p.name} value={p.name}>
@@ -939,7 +939,7 @@ export function AiCopilot({
             <select
               value={selectedDoctorId}
               onChange={(e) => setSelectedDoctorId(e.target.value)}
-              className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-slate-800 outline-none focus:border-emerald-600 sm:max-w-xs"
+              className="w-full min-w-0 max-w-full truncate rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-slate-800 outline-none focus:border-emerald-600 sm:w-auto sm:max-w-xs"
             >
               <option value="">— General / No specific doctor —</option>
               {doctors.map((d) => (
@@ -1053,7 +1053,7 @@ export function AiCopilot({
         {!isConversationHidden && (
           <div
             ref={chatBoxRef}
-            className="min-h-[240px] max-h-[60vh] space-y-4 overflow-y-auto rounded-3xl border border-slate-200 bg-slate-50 p-4 shadow-inner sm:min-h-[360px] sm:max-h-[520px] sm:p-5"
+            className="min-h-[240px] max-h-[60vh] space-y-4 overflow-y-auto overflow-x-hidden rounded-3xl border border-slate-200 bg-slate-50 p-4 shadow-inner sm:min-h-[360px] sm:max-h-[520px] sm:p-5"
           >
             {messages.map((m) => {
               const isUser = m.sender === "user";
@@ -1066,15 +1066,15 @@ export function AiCopilot({
                     </div>
                   )}
                   <div
-                    className={`max-w-[92%] sm:max-w-[85%] rounded-2xl p-4 sm:p-5 shadow-sm text-sm leading-relaxed ${
+                    className={`min-w-0 max-w-[92%] break-words rounded-2xl p-4 shadow-sm text-sm leading-relaxed sm:max-w-[85%] sm:p-5 ${
                       isUser
                         ? "bg-emerald-700 text-white font-medium"
                         : "bg-white border border-slate-200 text-slate-800"
                     }`}
                   >
                     {!isUser && (
-                      <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2 mb-2 text-[11px] font-bold text-slate-400">
-                        <span className="flex items-center gap-1.5 text-emerald-800 font-black">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2 mb-2 text-[11px] font-bold text-slate-400">
+                        <span className="flex min-w-0 items-center gap-1.5 break-words text-emerald-800 font-black">
                           <Sparkles className="h-3.5 w-3.5 text-amber-500" />
                           M DIVAKAR REDDY · BDM Nutrova
                         </span>
