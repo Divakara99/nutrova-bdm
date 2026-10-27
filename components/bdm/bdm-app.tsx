@@ -55,6 +55,7 @@ import { DoctorImportDialog, type ParsedDoctor } from "./doctor-import";
 import { AiCopilot } from "./ai-copilot";
 import {
   SETUP_SQL,
+  SESSION_EXPIRED,
   adoptRecoverySession,
   clearSession,
   clearUrlAuthParams,
@@ -1401,8 +1402,16 @@ export default function App() {
       })
       .catch((e) => {
         if (cancelled) return;
+        const msg = e instanceof Error ? e.message : "Could not load from online store";
+        if (msg === SESSION_EXPIRED) {
+          clearSession();
+          setSession(null);
+          setSyncState("idle");
+          setAuthInfo(SESSION_EXPIRED);
+          return;
+        }
         setSyncState("error");
-        setSyncError(e instanceof Error ? e.message : "Could not load from online store");
+        setSyncError(msg);
       });
     return () => {
       cancelled = true;
@@ -1425,8 +1434,16 @@ export default function App() {
             setLastSync(Date.now());
           })
           .catch((e) => {
+            const msg = e instanceof Error ? e.message : "Could not save to online store";
+            if (msg === SESSION_EXPIRED) {
+              clearSession();
+              setSession(null);
+              setSyncState("idle");
+              setAuthInfo(SESSION_EXPIRED);
+              return;
+            }
             setSyncState("error");
-            setSyncError(e instanceof Error ? e.message : "Could not save to online store");
+            setSyncError(msg);
           });
       },
     }),
