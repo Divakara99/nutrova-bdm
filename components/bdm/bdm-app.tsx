@@ -26,6 +26,7 @@ import {
   LogOut,
   Mail,
   MapPin,
+  MessageSquare,
   Package,
   Pencil,
   Phone,
@@ -118,6 +119,8 @@ interface Doctor {
   appointmentPhone: string;
   appointmentLead: string;
   appointmentNote: string;
+  updatedAt?: string;
+  createdAt?: string;
 }
 
 interface Reminder {
@@ -210,15 +213,16 @@ const SPECIALTIES = [
   "Other",
 ];
 
-/* Appointment — how to take appointment (as discussed: walk-in / phone / reception / prior booking) */
+/* Appointment — how to take appointment (walk-in / phone / WhatsApp / messages / no appointment / reception / PA / prior) */
 const APPOINTMENT_MODES = [
   "Walk-in",
   "Phone Call",
   "WhatsApp",
+  "Messages to doctor",
+  "No appointment",
   "Reception / Front Desk",
   "Secretary / PA",
   "Prior Appointment",
-  "Practo / Online",
 ];
 const APPOINTMENT_LEAD_GROUPS: { label: string; options: string[] }[] = [
   {
@@ -475,6 +479,41 @@ const fmtTime = (t: string) => {
   const am = h < 12 ? "AM" : "PM";
   const hr = h % 12 === 0 ? 12 : h % 12;
   return `${hr}:${String(m).padStart(2, "0")} ${am}`;
+};
+
+const fmtEditedAt = (iso?: string): string => {
+  if (!iso) return "Not edited";
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "Not edited";
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const timeStr = d.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+    if (isToday) return `Edited today at ${timeStr}`;
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (d.toDateString() === yesterday.toDateString()) return `Edited yesterday at ${timeStr}`;
+    const dateStr = d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
+    return `Edited on ${dateStr}, ${timeStr}`;
+  } catch {
+    return "Edited";
+  }
+};
+
+const fmtEditedShort = (iso?: string): string => {
+  if (!iso) return "Not edited";
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "Not edited";
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const timeStr = d.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+    if (isToday) return `Edited ${timeStr}`;
+    const dateStr = d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+    return `Edited ${dateStr}`;
+  } catch {
+    return "Edited";
+  }
 };
 
 /* Online-synced state.
@@ -1463,6 +1502,7 @@ export default function App() {
   const [settingsView, setSettingsView] = useState<"menu" | "account" | "password" | "online" | "alarms">("menu");
   const [frozenScrolled, setFrozenScrolled] = useState(false);
   const [search, setSearch] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
   const [specFilter, setSpecFilter] = useState("All");
   const [patchFilter, setPatchFilter] = useState<string>("all");
   const [productFilter, setProductFilter] = useState("All");
@@ -1529,6 +1569,9 @@ export default function App() {
   const [patchDraft, setPatchDraft] = useState<{ id: string; name: string }>({ id: "", name: "" });
   const [quickArea, setQuickArea] = useState("");
   const [quickAreaOpen, setQuickAreaOpen] = useState(false);
+  const [modalScheduleOpen, setModalScheduleOpen] = useState(false);
+  const [modalApptOpen, setModalApptOpen] = useState(false);
+  const [modalProductsOpen, setModalProductsOpen] = useState(false);
   const [monWeek, setMonWeek] = useState("1st");
   const [monDay, setMonDay] = useState("Tuesday");
   const [confirmDelete, setConfirmDelete] = useState<{ open: boolean; title: string; label: string; detail: string; confirmText: string; onYes: () => void }>({ open: false, title: "", label: "", detail: "", confirmText: "", onYes: () => {} });
@@ -2259,10 +2302,111 @@ export default function App() {
       if (callsTodayOnly && !doctorCallsOn(d, new Date())) return false;
       if (!q) return true;
       const patchName = patchOf(d.patchId)?.name || "";
-      return [d.name, d.specialty, d.area, d.city, d.clinic, d.phone, patchName, describeWeekly(d.callDays || []), (d.monthlyCalls || []).join(" "), (d.focusProducts || []).join(" "), (d.followProducts || []).join(" "), (d.appointmentModes || []).join(" "), d.appointmentContact || "", d.appointmentPhone || "", d.appointmentNote || ""].join(" ").toLowerCase().includes(q);
+      const isEditedStr = d.updatedAt ? "edited already edited" : "not edited original";
+      return [d.name, d.specialty, d.area, d.city, d.clinic, d.phone, patchName, isEditedStr, describeWeekly(d.callDays || []), (d.monthlyCalls || []).join(" "), (d.focusProducts || []).join(" "), (d.followProducts || []).join(" "), (d.appointmentModes || []).join(" "), d.appointmentContact || "", d.appointmentPhone || "", d.appointmentNote || ""].join(" ").toLowerCase().includes(q);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doctors, search, specFilter, productFilter, apptFilter, patchFilter, callsTodayOnly, patches]);
+
+  /* Smart matching suggestions for doctor search when text length >= 2 */
+  const searchSuggestions = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (q.length < 2) return [];
+
+    const results: { type: "Doctor" | "Area" | "Specialty" | "Clinic" | "Product"; title: string; subtitle?: string }[] = [];
+    const seen = new Set<string>();
+
+    // 0. Quick filter for edited doctors
+    if ("edited".includes(q) || q.startsWith("edit")) {
+      const editedCount = doctors.filter((d) => !!d.updatedAt).length;
+      if (editedCount > 0) {
+        results.push({
+          type: "Doctor",
+          title: "Edited",
+          subtitle: `${editedCount} doctor${editedCount !== 1 ? "s" : ""} edited`,
+        });
+      }
+    }
+
+    // 1. Doctors matching name
+    for (const d of doctors) {
+      if (d.name && d.name.toLowerCase().includes(q) && !seen.has(`doc:${d.name.toLowerCase()}`)) {
+        seen.add(`doc:${d.name.toLowerCase()}`);
+        results.push({
+          type: "Doctor",
+          title: d.name,
+          subtitle: `${d.specialty || "Specialist"} · ${d.area || d.city || ""}`,
+        });
+        if (results.length >= 8) break;
+      }
+    }
+
+    // 2. Areas / Patches matching
+    for (const p of patches) {
+      if (p.name && p.name.toLowerCase().includes(q) && !seen.has(`area:${p.name.toLowerCase()}`)) {
+        seen.add(`area:${p.name.toLowerCase()}`);
+        const count = doctors.filter((d) => d.patchId === p.id || (d.area || "").toLowerCase() === p.name.toLowerCase()).length;
+        results.push({
+          type: "Area",
+          title: p.name,
+          subtitle: `${count} doctor${count !== 1 ? "s" : ""} in area`,
+        });
+        if (results.length >= 8) break;
+      }
+    }
+    for (const d of doctors) {
+      if (d.area && d.area.toLowerCase().includes(q) && !seen.has(`area:${d.area.toLowerCase()}`)) {
+        seen.add(`area:${d.area.toLowerCase()}`);
+        results.push({
+          type: "Area",
+          title: d.area,
+          subtitle: "Area patch",
+        });
+        if (results.length >= 8) break;
+      }
+    }
+
+    // 3. Specialties matching
+    for (const s of SPECIALTIES) {
+      if (s !== "Other" && s.toLowerCase().includes(q) && !seen.has(`spec:${s.toLowerCase()}`)) {
+        seen.add(`spec:${s.toLowerCase()}`);
+        results.push({
+          type: "Specialty",
+          title: s,
+          subtitle: "Medical specialty",
+        });
+        if (results.length >= 8) break;
+      }
+    }
+
+    // 4. Clinics matching
+    for (const d of doctors) {
+      if (d.clinic && d.clinic.toLowerCase().includes(q) && !seen.has(`clinic:${d.clinic.toLowerCase()}`)) {
+        seen.add(`clinic:${d.clinic.toLowerCase()}`);
+        results.push({
+          type: "Clinic",
+          title: d.clinic,
+          subtitle: `${d.name} · ${d.area || d.city || ""}`,
+        });
+        if (results.length >= 8) break;
+      }
+    }
+
+    // 5. Products matching
+    for (const pr of NUTROVA_PRODUCTS) {
+      if (pr.name && pr.name.toLowerCase().includes(q) && !seen.has(`prod:${pr.name.toLowerCase()}`)) {
+        seen.add(`prod:${pr.name.toLowerCase()}`);
+        results.push({
+          type: "Product",
+          title: shortProduct(pr.name),
+          subtitle: pr.category,
+        });
+        if (results.length >= 8) break;
+      }
+    }
+
+    return results.slice(0, 8);
+  }, [search, doctors, patches]);
 
   const filteredReminders = useMemo(() => {
     const t = todayISO();
@@ -2316,6 +2460,10 @@ export default function App() {
     setMonWeek("1st");
     setMonDay("Tuesday");
     setQuickArea("");
+    setQuickAreaOpen(false);
+    setModalScheduleOpen(false);
+    setModalApptOpen(false);
+    setModalProductsOpen(false);
     setDoctorModal({ open: true, draft, editing });
   };
 
@@ -2373,11 +2521,19 @@ export default function App() {
       const byName = patches.find((p) => p.name.toLowerCase() === area.toLowerCase());
       if (byName) patchId = byName.id;
     }
-    const rec = { ...d, area, patchId };
-    if (doctorModal.editing) setDoctors((prev) => prev.map((x) => (x.id === rec.id ? rec : x)));
+    const isEdit = doctorModal.editing;
+    const nowIso = new Date().toISOString();
+    const rec: Doctor = {
+      ...d,
+      area,
+      patchId,
+      updatedAt: isEdit ? nowIso : (d.updatedAt || undefined),
+      createdAt: d.createdAt || nowIso,
+    };
+    if (isEdit) setDoctors((prev) => prev.map((x) => (x.id === rec.id ? rec : x)));
     else setDoctors((prev) => [{ ...rec, id: uid() }, ...prev]);
     setDoctorModal({ open: false, draft: emptyDoctor(), editing: false });
-    showToast(doctorModal.editing ? "Doctor updated" : "Doctor added to patch");
+    showToast(isEdit ? "Doctor updated & edit time saved" : "Doctor added to patch");
   };
 
   /* Bulk upload: CSV rows → doctors. Matches area names to existing patches
@@ -2634,7 +2790,7 @@ export default function App() {
 
   const exportDoctors = () => {
     if (filteredDoctors.length === 0) return showToast("No doctors to download", "info");
-    const header = ["Name", "Specialty", "Qualification", "Clinic", "Area / Patch", "City", "Phone", "Email", "Priority", "Frequency", "Call Days", "Monthly Calls", "Call Time", "Appointment Modes", "Appointment Lead", "Appointment Contact", "Appointment Phone", "Appointment Note", "Focus Products", "Follow-up Products", "Last Visit", "Days Since Last Visit", "Next Visit", "Days Overdue (Next)", "Notes"];
+    const header = ["Name", "Specialty", "Qualification", "Clinic", "Area / Patch", "City", "Phone", "Email", "Priority", "Frequency", "Call Days", "Monthly Calls", "Call Time", "Appointment Modes", "Appointment Lead", "Appointment Contact", "Appointment Phone", "Appointment Note", "Focus Products", "Follow-up Products", "Last Visit", "Days Since Last Visit", "Next Visit", "Days Overdue (Next)", "Notes", "Last Edited"];
     const rows = filteredDoctors.map((d) => [
       d.name, d.specialty, d.qualification || "", d.clinic, d.area, d.city, d.phone, d.email || "",
       d.priority, d.frequency, describeWeekly(d.callDays || []), (d.monthlyCalls || []).join(" + "), describeTime(d),
@@ -2642,6 +2798,7 @@ export default function App() {
       (d.focusProducts || []).join(" + "), (d.followProducts || []).join(" + "),
       d.lastVisit ? fmtDate(d.lastVisit) : "", d.lastVisit ? String(daysSince(d.lastVisit)) : "",
       d.nextVisit ? fmtDate(d.nextVisit) : "", String(daysOverdue(d.nextVisit)), d.notes || "",
+      d.updatedAt ? fmtEditedAt(d.updatedAt) : "Not edited",
     ]);
     downloadCSV(`nutrova-doctors-${todayISO()}.csv`, header, rows);
     showToast(`Downloaded ${filteredDoctors.length} doctors as CSV`);
@@ -3033,17 +3190,11 @@ export default function App() {
                 </p>
               </div>
             </div>
-            <div className="flex shrink-0 items-start gap-2 pt-0.5 sm:gap-2">
-              <span className="hidden items-center gap-2 pt-2 text-sm font-medium text-emerald-100/90 xl:flex">
-                <Mail className="h-4 w-4 shrink-0 text-emerald-300" />
-                <span className="max-w-[180px] truncate">{APP_OWNER.email}</span>
+            <div className="flex shrink-0 items-center gap-2 pt-1 sm:pt-0">
+              <span className="hidden items-center gap-2 text-xs font-semibold text-emerald-100/90 sm:flex bg-white/10 px-3 py-1.5 rounded-full ring-1 ring-white/15">
+                <Mail className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
+                <span className="max-w-[190px] truncate">{APP_OWNER.email}</span>
               </span>
-              <button onClick={() => setShareOpen(true)} title="Share this app with others" className="flex shrink-0 items-center gap-1.5 rounded-full bg-amber-400 font-extrabold text-amber-950 shadow transition hover:bg-amber-300 sm:gap-2 sm:text-sm px-3.5 py-2 text-xs sm:px-4 sm:py-2.5 sm:text-sm">
-                <Share2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> <span className="hidden sm:inline">Share</span>
-              </button>
-              <button onClick={handleSignOut} className="flex shrink-0 items-center gap-1.5 rounded-full bg-white/10 font-bold text-white ring-1 ring-white/15 transition hover:bg-white/20 sm:gap-2 sm:text-sm px-3.5 py-2 text-xs sm:px-5 sm:py-2.5 sm:text-sm">
-                <LogOut className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> Sign out
-              </button>
             </div>
           </div>
         </header>
@@ -3124,8 +3275,19 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <div className="border-t border-slate-200 p-4">
-              <button onClick={() => { setMenuOpen(false); handleSignOut(); }} className="flex w-full items-center justify-center gap-2 rounded-xl border border-rose-200 bg-rose-50 py-2.5 text-sm font-extrabold text-rose-600 transition hover:bg-rose-100">
+            <div className="border-t border-slate-200 p-4 space-y-2">
+              <button
+                type="button"
+                onClick={() => { setMenuOpen(false); setShareOpen(true); }}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 py-2.5 text-sm font-extrabold text-amber-950 transition hover:bg-amber-100 active:scale-98"
+              >
+                <Share2 className="h-4 w-4 text-amber-700" /> Share App
+              </button>
+              <button
+                type="button"
+                onClick={() => { setMenuOpen(false); handleSignOut(); }}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-rose-200 bg-rose-50 py-2.5 text-sm font-extrabold text-rose-600 transition hover:bg-rose-100 active:scale-98"
+              >
                 <LogOut className="h-4 w-4" /> Sign out
               </button>
             </div>
@@ -3514,10 +3676,97 @@ export default function App() {
           </div>
 
           <div className="mt-4 flex flex-col gap-3 lg:flex-row">
-            <div className="flex flex-1 items-center gap-2.5 rounded-2xl border border-emerald-200 bg-white px-4 py-3 shadow-sm transition focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
-              <Search className="h-5 w-5 shrink-0 text-emerald-600" />
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={isAndroidPhone ? "Search doctors…" : "Search doctor / area / specialty / product / appointment"} className="w-full bg-transparent text-[15px] font-medium text-slate-800 outline-none placeholder:text-slate-400" />
-              {search && <button onClick={() => setSearch("")} className="rounded-full p-1 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
+            <div className="relative flex-1">
+              <div className="flex items-center gap-2.5 rounded-2xl border border-emerald-200 bg-white px-4 py-3 shadow-sm transition focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+                <Search className="h-5 w-5 shrink-0 text-emerald-600" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  onFocus={() => setSearchFocused(true)}
+                  onBlur={() => setTimeout(() => setSearchFocused(false), 250)}
+                  placeholder={isAndroidPhone ? "Search doctors…" : "Search doctor / area / specialty / product / appointment"}
+                  className="w-full bg-transparent text-[15px] font-medium text-slate-800 outline-none placeholder:text-slate-400"
+                />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearch("");
+                      setSearchFocused(false);
+                    }}
+                    className="rounded-full p-1 text-slate-400 hover:bg-slate-100"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* Matching suggestions dropdown when >= 2 characters typed */}
+              {searchFocused && search.trim().length >= 2 && searchSuggestions.length > 0 && (
+                <div className="absolute left-0 right-0 top-full mt-2 z-30 max-h-80 overflow-y-auto rounded-2xl border border-emerald-200 bg-white p-2 shadow-2xl anim-pop">
+                  <div className="px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 border-b border-slate-100 flex items-center justify-between">
+                    <span>Matching items to select ({searchSuggestions.length})</span>
+                    <span className="text-[10px] font-bold text-emerald-700">Tap to select</span>
+                  </div>
+                  <div className="mt-1 space-y-0.5">
+                    {searchSuggestions.map((item, idx) => {
+                      const badgeColors: Record<string, string> = {
+                        Doctor: "bg-emerald-100 text-emerald-800 border-emerald-200",
+                        Area: "bg-sky-100 text-sky-800 border-sky-200",
+                        Specialty: "bg-violet-100 text-violet-800 border-violet-200",
+                        Clinic: "bg-amber-100 text-amber-800 border-amber-200",
+                        Product: "bg-teal-100 text-teal-800 border-teal-200",
+                      };
+                      return (
+                        <button
+                          key={idx}
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setSearch(item.title);
+                            setSearchFocused(false);
+                          }}
+                          className="flex w-full items-center justify-between gap-2.5 rounded-xl px-3 py-2 text-left transition hover:bg-emerald-50 active:bg-emerald-100"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-xs font-black text-slate-900">{item.title}</p>
+                            {item.subtitle && (
+                              <p className="truncate text-[11px] font-medium text-slate-500">{item.subtitle}</p>
+                            )}
+                          </div>
+                          <span
+                            className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-extrabold ${
+                              badgeColors[item.type] || "bg-slate-100 text-slate-700"
+                            }`}
+                          >
+                            {item.type}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Matching suggestion pill bar right below search bar when typing */}
+              {search.trim().length >= 2 && searchSuggestions.length > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5 px-1">
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mr-0.5">
+                    Quick select:
+                  </span>
+                  {searchSuggestions.slice(0, 5).map((item, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setSearch(item.title)}
+                      className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 shadow-sm hover:bg-emerald-50 hover:border-emerald-300 transition"
+                    >
+                      <span className="text-[10px] text-emerald-700 font-extrabold uppercase">{item.type}:</span>
+                      <span>{item.title}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="flex flex-col gap-3 sm:flex-row">
               <select value={specFilter} onChange={(e) => setSpecFilter(e.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500">
@@ -3611,6 +3860,22 @@ export default function App() {
                             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-extrabold text-slate-500">{d.area || "No patch"}</span>
                           )}
                           {d.priority === "High" && <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-extrabold text-rose-600 ring-1 ring-rose-100">High priority</span>}
+                          {/* Already edited or not edited status badge */}
+                          {d.updatedAt ? (
+                            <span
+                              className="rounded-full bg-violet-100/90 text-violet-900 border border-violet-200 px-2.5 py-0.5 text-[11px] font-black flex items-center gap-1 shadow-xs"
+                              title={`Doctor was edited on ${fmtEditedAt(d.updatedAt)}`}
+                            >
+                              <Pencil className="h-2.5 w-2.5 text-violet-700" /> {fmtEditedShort(d.updatedAt)}
+                            </span>
+                          ) : (
+                            <span
+                              className="rounded-full bg-slate-100 text-slate-500 px-2.5 py-0.5 text-[11px] font-semibold"
+                              title="Original doctor record, not edited yet"
+                            >
+                              Not edited
+                            </span>
+                          )}
                         </div>
                       </div>
                       {!selectMode && (
@@ -3623,7 +3888,33 @@ export default function App() {
                     <div className="mt-3 space-y-1.5 text-[13px] font-medium text-slate-600">
                       <p className="flex items-center gap-2 truncate"><Building2 className="h-3.5 w-3.5 shrink-0 text-slate-400" /> {d.clinic || "—"}</p>
                       <p className="flex items-center gap-2 truncate"><MapPin className="h-3.5 w-3.5 shrink-0 text-slate-400" /> {d.area}{d.city ? `, ${d.city}` : ""} <span className="text-slate-300">·</span> {d.frequency}</p>
-                      <p className="flex items-center gap-2"><Phone className="h-3.5 w-3.5 shrink-0 text-slate-400" /> {d.phone || "—"}</p>
+                      <div className="flex items-center gap-2">
+                        <Phone className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                        {d.phone ? (
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={`tel:${d.phone}`}
+                              onClick={(e) => e.stopPropagation()}
+                              className="font-bold text-emerald-800 hover:underline"
+                              title="Tap to call doctor directly"
+                            >
+                              {d.phone}
+                            </a>
+                            <a
+                              href={`https://wa.me/${d.phone.replace(/\D/g, "").length === 10 ? `91${d.phone.replace(/\D/g, "")}` : d.phone.replace(/\D/g, "")}?text=${encodeURIComponent(`Hello ${d.name}, greetings from Nutrova.`)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-[#25D366] hover:brightness-90 p-0.5"
+                              title="WhatsApp message to doctor"
+                            >
+                              <Share2 className="h-3.5 w-3.5 inline" />
+                            </a>
+                          </div>
+                        ) : (
+                          <span>—</span>
+                        )}
+                      </div>
                     </div>
 
                     {!open && !selectMode && (
@@ -3667,12 +3958,19 @@ export default function App() {
                       </p>
                     </div>
 
-                    {/* Appointment — how to take appointment */}
+                    {/* Appointment — how to take appointment with direct calling & messaging */}
                     {((d.appointmentModes || []).length > 0 || d.appointmentContact || d.appointmentPhone || d.appointmentNote) && (
-                      <div className="mt-3 rounded-2xl border border-sky-200 bg-sky-50/60 p-3">
-                        <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest text-sky-800">
-                          <CalendarDays className="h-3.5 w-3.5" /> Appointment · {d.appointmentLead || "Same day"}
-                        </p>
+                      <div className="mt-3 rounded-2xl border border-sky-200 bg-sky-50/60 p-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest text-sky-800">
+                            <CalendarDays className="h-3.5 w-3.5 text-sky-700" /> Appointment · {d.appointmentLead || "Same day"}
+                          </p>
+                          {((d.appointmentModes || []).includes("No appointment") || (d.appointmentModes || []).includes("Walk-in")) && (
+                            <span className="rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5 text-[10px] font-extrabold">
+                              Direct Walk-in
+                            </span>
+                          )}
+                        </div>
                         {(d.appointmentModes || []).length > 0 && (
                           <div className="mt-2 flex flex-wrap gap-1.5">
                             {(d.appointmentModes || []).map((m) => (
@@ -3681,12 +3979,59 @@ export default function App() {
                           </div>
                         )}
                         {(d.appointmentContact || d.appointmentPhone) && (
-                          <p className="mt-2 flex items-center gap-1.5 truncate text-xs font-bold text-slate-600">
+                          <p className="mt-2 flex items-center gap-1.5 truncate text-xs font-bold text-slate-700">
                             <User className="h-3.5 w-3.5 shrink-0 text-slate-400" />
                             <span className="truncate">{d.appointmentContact}{d.appointmentContact && d.appointmentPhone ? " · " : ""}{d.appointmentPhone}</span>
                           </p>
                         )}
                         {d.appointmentNote && <p className="mt-1 line-clamp-2 text-xs font-medium leading-relaxed text-slate-500">{d.appointmentNote}</p>}
+
+                        {/* Direct Calling & Messaging Options */}
+                        {(() => {
+                          const contactPhone = (d.appointmentPhone || d.phone || "").trim();
+                          const digits = contactPhone.replace(/\D/g, "");
+                          const telHref = contactPhone ? `tel:${contactPhone}` : "";
+                          const waNum = digits.length === 10 ? `91${digits}` : digits;
+                          const defMsg = `Hello, this is regarding doctor appointment for ${d.name} from Nutrova.`;
+                          const waHref = digits ? `https://wa.me/${waNum}?text=${encodeURIComponent(defMsg)}` : "";
+                          const smsHref = contactPhone ? `sms:${contactPhone}?body=${encodeURIComponent(defMsg)}` : "";
+                          const contactName = d.appointmentContact ? d.appointmentContact.split(" ")[0] : "Appointment";
+
+                          if (!contactPhone) return null;
+
+                          return (
+                            <div className="mt-3 pt-2.5 border-t border-sky-200 flex flex-wrap items-center gap-2">
+                              <a
+                                href={telHref}
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-700 px-3 py-1.5 text-xs font-black text-white shadow-sm hover:bg-emerald-800 transition active:scale-95"
+                                title={`Direct Phone Call: ${contactPhone}`}
+                              >
+                                <Phone className="h-3.5 w-3.5" /> Call {contactName}
+                              </a>
+                              {waHref && (
+                                <a
+                                  href={waHref}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#25D366] px-3 py-1.5 text-xs font-black text-white shadow-sm hover:brightness-95 transition active:scale-95"
+                                  title={`Direct WhatsApp to ${contactPhone}`}
+                                >
+                                  <Share2 className="h-3.5 w-3.5" /> WhatsApp
+                                </a>
+                              )}
+                              <a
+                                href={smsHref}
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-sky-300 bg-white px-3 py-1.5 text-xs font-black text-sky-800 hover:bg-sky-50 transition active:scale-95"
+                                title={`Direct SMS Message: ${contactPhone}`}
+                              >
+                                <MessageSquare className="h-3.5 w-3.5" /> SMS Message
+                              </a>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
 
@@ -3754,6 +4099,24 @@ export default function App() {
                           </span>
                         );
                       })()}
+
+                      {/* Doctor Edit Tracking Status Badge */}
+                      {d.updatedAt ? (
+                        <span
+                          className="rounded-lg px-2.5 py-1.5 bg-violet-50 text-violet-800 border border-violet-200 text-xs font-black flex items-center gap-1.5"
+                          title={`Doctor profile was edited: ${d.updatedAt}`}
+                        >
+                          <Pencil className="h-3.5 w-3.5 text-violet-600 shrink-0" />
+                          <span>{fmtEditedAt(d.updatedAt)}</span>
+                        </span>
+                      ) : (
+                        <span
+                          className="rounded-lg px-2.5 py-1.5 bg-slate-100 text-slate-500 font-bold text-xs"
+                          title="Original doctor record — not edited yet"
+                        >
+                          Not edited yet
+                        </span>
+                      )}
                     </div>
 
                     {!selectMode && (
@@ -4727,6 +5090,26 @@ export default function App() {
       {/* ------------------------------- doctor modal ------------------------------ */}
       {doctorModal.open && (
         <Modal title={doctorModal.editing ? "Edit Doctor" : "Add Doctor"} wide onClose={() => setDoctorModal({ open: false, draft: emptyDoctor(), editing: false })}>
+          {doctorModal.editing && (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-violet-200 bg-violet-50/70 p-3 sm:px-4 text-xs">
+              <span className="flex items-center gap-1.5 font-extrabold text-slate-800">
+                <span className={`h-2.5 w-2.5 rounded-full ${doctorModal.draft.updatedAt ? "bg-violet-600" : "bg-slate-400"}`} />
+                Editing Status:{" "}
+                <span className={doctorModal.draft.updatedAt ? "text-violet-800 font-black" : "text-slate-600 font-semibold"}>
+                  {doctorModal.draft.updatedAt ? "Already edited" : "Not edited yet (original record)"}
+                </span>
+              </span>
+              {doctorModal.draft.updatedAt ? (
+                <span className="font-black text-violet-700 bg-white border border-violet-200 rounded-lg px-2.5 py-1 shadow-xs">
+                  {fmtEditedAt(doctorModal.draft.updatedAt)}
+                </span>
+              ) : (
+                <span className="text-slate-500 font-medium text-[11px]">
+                  Timestamp will be recorded once you tap Update Doctor
+                </span>
+              )}
+            </div>
+          )}
           <p className="mb-3 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Basic details</p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Doctor name *" span><input value={doctorModal.draft.name} onChange={(e) => setDraft({ name: e.target.value })} placeholder="Dr. Full Name" className={inputCls} /></Field>
@@ -4776,126 +5159,193 @@ export default function App() {
             </div>
           </div>
 
-          {/* call schedule */}
-          <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50/40 p-4">
-            <p className="flex items-center gap-1.5 text-[12px] font-extrabold uppercase tracking-widest text-emerald-800">
-              <CalendarClock className="h-4 w-4" /> Call schedule — which days doctor gives calls *
-            </p>
-
-            <p className="mb-2 mt-3 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Weekly call days — tap to toggle</p>
-            <div className="flex flex-wrap gap-2">
-              {WEEK_SHORT.map((day) => {
-                const on = (doctorModal.draft.callDays || []).includes(day);
-                return (
-                  <button key={day} type="button" onClick={() => toggleCallDay(day)} className={`rounded-xl px-4 py-2.5 text-sm font-extrabold transition ${on ? "bg-emerald-700 text-white shadow-md shadow-emerald-200" : "bg-white text-slate-400 ring-1 ring-slate-200 hover:ring-emerald-300 hover:text-emerald-700"}`}>
-                    {day}
-                  </button>
-                );
-              })}
-            </div>
-
-            <p className="mb-2 mt-4 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Monthly rules — e.g. 1st Tuesday, 1st Thursday, Last Thursday</p>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <select value={monWeek} onChange={(e) => setMonWeek(e.target.value)} className={`${inputCls} sm:max-w-[130px]`}>
-                {MONTH_WEEKS.map((w) => <option key={w}>{w}</option>)}
-              </select>
-              <select value={monDay} onChange={(e) => setMonDay(e.target.value)} className={`${inputCls} sm:max-w-[180px]`}>
-                {WEEK_FULL.map((d) => <option key={d}>{d}</option>)}
-              </select>
-              <button type="button" onClick={addMonthlyRule} className="flex items-center justify-center gap-1.5 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-extrabold text-white transition hover:bg-violet-700">
-                <Plus className="h-4 w-4" /> Add {monWeek} {monDay}
-              </button>
-            </div>
-            {(doctorModal.draft.monthlyCalls || []).length > 0 && (
-              <div className="mt-2.5 flex flex-wrap gap-1.5">
-                {(doctorModal.draft.monthlyCalls || []).map((r) => (
-                  <span key={r} className="flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 py-1 pl-3 pr-1.5 text-xs font-extrabold text-violet-700">
-                    {r}
-                    <button type="button" onClick={() => removeMonthlyRule(r)} className="flex h-5 w-5 items-center justify-center rounded-full bg-violet-200/60 text-violet-700 hover:bg-violet-300"><X className="h-3 w-3" /></button>
+          {/* call schedule — expandable dropdown card */}
+          <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50/40 p-3.5 sm:p-4 transition">
+            <button
+              type="button"
+              onClick={() => setModalScheduleOpen((v) => !v)}
+              className="flex w-full items-center justify-between text-left"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="flex items-center gap-1.5 text-[12px] font-extrabold uppercase tracking-widest text-emerald-800">
+                  <CalendarClock className="h-4 w-4 text-emerald-700" /> Call schedule — days doctor gives calls *
+                </span>
+                {!modalScheduleOpen && (doctorModal.draft.callDays || []).length > 0 && (
+                  <span className="rounded-full bg-emerald-700 text-white text-[11px] font-extrabold px-2.5 py-0.5">
+                    {describeWeekly(doctorModal.draft.callDays || [])}
                   </span>
-                ))}
+                )}
+                {!modalScheduleOpen && doctorModal.draft.callTimeFrom && (
+                  <span className="rounded-full bg-white text-slate-600 text-[11px] font-semibold px-2 py-0.5 ring-1 ring-slate-200">
+                    {describeTime(doctorModal.draft)}
+                  </span>
+                )}
               </div>
-            )}
+              <ChevronDown className={`h-4 w-4 text-emerald-700 shrink-0 transition-transform duration-200 ${modalScheduleOpen ? "rotate-180" : ""}`} />
+            </button>
 
-            <div className="mt-4 grid grid-cols-2 gap-3">
-              <Field label="Call time from"><input type="time" value={doctorModal.draft.callTimeFrom} onChange={(e) => setDraft({ callTimeFrom: e.target.value })} className={inputCls} /></Field>
-              <Field label="Call time to"><input type="time" value={doctorModal.draft.callTimeTo} onChange={(e) => setDraft({ callTimeTo: e.target.value })} className={inputCls} /></Field>
-            </div>
+            {modalScheduleOpen && (
+              <div className="mt-3.5 pt-3.5 border-t border-emerald-200/70 space-y-3">
+                <p className="mb-2 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Weekly call days — tap to toggle</p>
+                <div className="flex flex-wrap gap-2">
+                  {WEEK_SHORT.map((day) => {
+                    const on = (doctorModal.draft.callDays || []).includes(day);
+                    return (
+                      <button key={day} type="button" onClick={() => toggleCallDay(day)} className={`rounded-xl px-4 py-2.5 text-sm font-extrabold transition ${on ? "bg-emerald-700 text-white shadow-md shadow-emerald-200" : "bg-white text-slate-400 ring-1 ring-slate-200 hover:ring-emerald-300 hover:text-emerald-700"}`}>
+                        {day}
+                      </button>
+                    );
+                  })}
+                </div>
 
-            {/* live preview */}
-            <div className="mt-3 rounded-xl bg-emerald-900 px-4 py-3 text-white">
-              <p className="text-[10px] font-extrabold uppercase tracking-widest text-emerald-300">Schedule preview</p>
-              <p className="mt-0.5 text-sm font-extrabold">
-                {describeWeekly(doctorModal.draft.callDays || [])}
-                {(doctorModal.draft.monthlyCalls || []).length > 0 && <span className="font-bold text-violet-200"> + {(doctorModal.draft.monthlyCalls || []).join(" · ")}</span>}
-              </p>
-              <p className="text-xs font-semibold text-emerald-200">{describeTime(doctorModal.draft)} · Next call: {nextCallDate(doctorModal.draft)?.label || "—"} {nextCallDate(doctorModal.draft) ? `(${fmtShort(nextCallDate(doctorModal.draft)!.iso)} · ${fmtDayName(nextCallDate(doctorModal.draft)!.iso)})` : ""}</p>
-            </div>
-          </div>
-
-          {/* Appointment — how to take appointment */}
-          <div className="mt-6 rounded-2xl border border-sky-200 bg-sky-50/40 p-4">
-            <p className="flex items-center gap-1.5 text-[12px] font-extrabold uppercase tracking-widest text-sky-900">
-              <CalendarDays className="h-4 w-4" /> Appointment — how to take appointment
-            </p>
-            <p className="mt-1 text-xs font-medium text-slate-500">Select one or more ways the Business Development Manager should book the visit</p>
-            <p className="mb-2 mt-3 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Ways to take appointment — tap to select</p>
-            <div className="flex flex-wrap gap-1.5">
-              {APPOINTMENT_MODES.map((mode) => {
-                const on = (doctorModal.draft.appointmentModes || []).includes(mode);
-                return (
-                  <button key={mode} type="button" onClick={() => toggleAppointmentMode(mode)} className={`rounded-full border px-3 py-1.5 text-xs font-extrabold transition ${on ? "border-sky-600 bg-sky-600 text-white shadow-sm" : "border-slate-200 bg-white text-slate-500 hover:border-sky-300 hover:text-sky-700"}`}>
-                    {on ? "✓ " : ""}{mode}
+                <p className="mb-2 mt-4 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Monthly rules — e.g. 1st Tuesday, 1st Thursday, Last Thursday</p>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <select value={monWeek} onChange={(e) => setMonWeek(e.target.value)} className={`${inputCls} sm:max-w-[130px]`}>
+                    {MONTH_WEEKS.map((w) => <option key={w}>{w}</option>)}
+                  </select>
+                  <select value={monDay} onChange={(e) => setMonDay(e.target.value)} className={`${inputCls} sm:max-w-[180px]`}>
+                    {WEEK_FULL.map((d) => <option key={d}>{d}</option>)}
+                  </select>
+                  <button type="button" onClick={addMonthlyRule} className="flex items-center justify-center gap-1.5 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-extrabold text-white transition hover:bg-violet-700">
+                    <Plus className="h-4 w-4" /> Add {monWeek} {monDay}
                   </button>
-                );
-              })}
-            </div>
-            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label="When to book / Book in advance">
-                <select value={doctorModal.draft.appointmentLead} onChange={(e) => setDraft({ appointmentLead: e.target.value })} className={inputCls}>
-                  {APPOINTMENT_LEAD_GROUPS.map((g) => (
-                    <optgroup key={g.label} label={g.label}>
-                      {g.options.map((l) => <option key={l} value={l}>{l}</option>)}
-                    </optgroup>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Contact person"><input value={doctorModal.draft.appointmentContact} onChange={(e) => setDraft({ appointmentContact: e.target.value })} placeholder="e.g. Reception / Arun (PA)" className={inputCls} /></Field>
-              <Field label="Appointment phone"><input value={doctorModal.draft.appointmentPhone} onChange={(e) => setDraft({ appointmentPhone: e.target.value })} placeholder="Phone / WhatsApp number" className={inputCls} /></Field>
-              <Field label="Appointment note"><input value={doctorModal.draft.appointmentNote} onChange={(e) => setDraft({ appointmentNote: e.target.value })} placeholder="e.g. Call previous evening" className={inputCls} /></Field>
-            </div>
-            <div className="mt-3 rounded-xl border border-sky-200 bg-white/70 p-3">
-              <p className="mb-2 text-[11px] font-extrabold uppercase tracking-widest text-sky-800">Book in advance — before month date · tap to select</p>
-              <div className="flex flex-wrap gap-1.5">
-                {APPOINTMENT_MONTH_CUTOFFS.map((opt) => {
-                  const on = doctorModal.draft.appointmentLead === opt;
-                  const short = opt.replace(" of month", "").replace("Before ", "Before ");
-                  return (
-                    <button key={opt} type="button" onClick={() => setDraft({ appointmentLead: opt })} title={opt} className={`rounded-full border px-3 py-1.5 text-xs font-extrabold transition ${on ? "border-sky-600 bg-sky-600 text-white shadow-sm" : "border-sky-200 bg-sky-50 text-sky-800 hover:bg-sky-100"}`}>
-                      {on ? "✓ " : ""}{short}
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="mt-2 text-[11px] font-semibold text-slate-500">e.g. Before 20th = book next month slot before 20th · Before 25th = before 25th · all cutoffs available</p>
-            </div>
-            {(doctorModal.draft.appointmentModes || []).length > 0 && (
-              <div className="mt-3 rounded-xl bg-sky-900 px-4 py-3 text-white">
-                <p className="text-[10px] font-extrabold uppercase tracking-widest text-sky-300">Appointment preview</p>
-                <p className="mt-0.5 text-sm font-extrabold">{(doctorModal.draft.appointmentModes || []).join(" · ")}</p>
-                <p className="text-xs font-semibold text-sky-200">{doctorModal.draft.appointmentLead}{doctorModal.draft.appointmentContact ? ` · ${doctorModal.draft.appointmentContact}` : ""}{doctorModal.draft.appointmentPhone ? ` · ${doctorModal.draft.appointmentPhone}` : ""}</p>
+                </div>
+                {(doctorModal.draft.monthlyCalls || []).length > 0 && (
+                  <div className="mt-2.5 flex flex-wrap gap-1.5">
+                    {(doctorModal.draft.monthlyCalls || []).map((r) => (
+                      <span key={r} className="flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 py-1 pl-3 pr-1.5 text-xs font-extrabold text-violet-700">
+                        {r}
+                        <button type="button" onClick={() => removeMonthlyRule(r)} className="flex h-5 w-5 items-center justify-center rounded-full bg-violet-200/60 text-violet-700 hover:bg-violet-300"><X className="h-3 w-3" /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <Field label="Call time from"><input type="time" value={doctorModal.draft.callTimeFrom} onChange={(e) => setDraft({ callTimeFrom: e.target.value })} className={inputCls} /></Field>
+                  <Field label="Call time to"><input type="time" value={doctorModal.draft.callTimeTo} onChange={(e) => setDraft({ callTimeTo: e.target.value })} className={inputCls} /></Field>
+                </div>
+
+                {/* live preview */}
+                <div className="mt-3 rounded-xl bg-emerald-900 px-4 py-3 text-white">
+                  <p className="text-[10px] font-extrabold uppercase tracking-widest text-emerald-300">Schedule preview</p>
+                  <p className="mt-0.5 text-sm font-extrabold">
+                    {describeWeekly(doctorModal.draft.callDays || [])}
+                    {(doctorModal.draft.monthlyCalls || []).length > 0 && <span className="font-bold text-violet-200"> + {(doctorModal.draft.monthlyCalls || []).join(" · ")}</span>}
+                  </p>
+                  <p className="text-xs font-semibold text-emerald-200">{describeTime(doctorModal.draft)} · Next call: {nextCallDate(doctorModal.draft)?.label || "—"} {nextCallDate(doctorModal.draft) ? `(${fmtShort(nextCallDate(doctorModal.draft)!.iso)} · ${fmtDayName(nextCallDate(doctorModal.draft)!.iso)})` : ""}</p>
+                </div>
               </div>
             )}
           </div>
 
-          {/* Nutrova products */}
-          <div className="mt-6 rounded-2xl border border-teal-200 bg-teal-50/40 p-4">
-            <p className="flex items-center gap-1.5 text-[12px] font-extrabold uppercase tracking-widest text-teal-900">
-              <Package className="h-4 w-4" /> Nutrova products — focus & follow-up
-            </p>
-            <p className="mt-1 text-xs font-medium text-slate-500">Full names from your uploaded sheet · 25 products · tap to select. Duplicates in the file were merged.</p>
-            <ProductSelector label="Focus products" hint="detail on every visit" icon={<Target className="h-3.5 w-3.5" />} selected={doctorModal.draft.focusProducts || []} onToggle={(n) => toggleProduct("focusProducts", n)} onClear={() => clearDoctorProducts("focusProducts")} accent="emerald" />
-            <ProductSelector label="Follow-up products" hint="Track Rx / feedback" icon={<RefreshCcw className="h-3.5 w-3.5" />} selected={doctorModal.draft.followProducts || []} onToggle={(n) => toggleProduct("followProducts", n)} onClear={() => clearDoctorProducts("followProducts")} accent="amber" />
+          {/* Appointment — expandable dropdown card */}
+          <div className="mt-4 rounded-2xl border border-sky-200 bg-sky-50/40 p-3.5 sm:p-4 transition">
+            <button
+              type="button"
+              onClick={() => setModalApptOpen((v) => !v)}
+              className="flex w-full items-center justify-between text-left"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="flex items-center gap-1.5 text-[12px] font-extrabold uppercase tracking-widest text-sky-900">
+                  <CalendarDays className="h-4 w-4 text-sky-700" /> Appointment — how to take appointment
+                </span>
+                {!modalApptOpen && (doctorModal.draft.appointmentModes || []).length > 0 && (
+                  <span className="rounded-full bg-sky-700 text-white text-[11px] font-extrabold px-2.5 py-0.5">
+                    {(doctorModal.draft.appointmentModes || []).slice(0, 2).join(", ")}
+                    {(doctorModal.draft.appointmentModes || []).length > 2 ? ` +${(doctorModal.draft.appointmentModes || []).length - 2}` : ""}
+                  </span>
+                )}
+                {!modalApptOpen && doctorModal.draft.appointmentLead && (
+                  <span className="rounded-full bg-white text-sky-800 text-[11px] font-semibold px-2 py-0.5 ring-1 ring-sky-200">
+                    {doctorModal.draft.appointmentLead}
+                  </span>
+                )}
+              </div>
+              <ChevronDown className={`h-4 w-4 text-sky-700 shrink-0 transition-transform duration-200 ${modalApptOpen ? "rotate-180" : ""}`} />
+            </button>
+
+            {modalApptOpen && (
+              <div className="mt-3.5 pt-3.5 border-t border-sky-200/70 space-y-3">
+                <p className="text-xs font-medium text-slate-500">Select one or more ways the Business Development Manager should book the visit</p>
+                <p className="mb-2 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Ways to take appointment — tap to select</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {APPOINTMENT_MODES.map((mode) => {
+                    const on = (doctorModal.draft.appointmentModes || []).includes(mode);
+                    return (
+                      <button key={mode} type="button" onClick={() => toggleAppointmentMode(mode)} className={`rounded-full border px-3 py-1.5 text-xs font-extrabold transition ${on ? "border-sky-600 bg-sky-600 text-white shadow-sm" : "border-slate-200 bg-white text-slate-500 hover:border-sky-300 hover:text-sky-700"}`}>
+                        {on ? "✓ " : ""}{mode}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Field label="When to book / Book in advance">
+                    <select value={doctorModal.draft.appointmentLead} onChange={(e) => setDraft({ appointmentLead: e.target.value })} className={inputCls}>
+                      {APPOINTMENT_LEAD_GROUPS.map((g) => (
+                        <optgroup key={g.label} label={g.label}>
+                          {g.options.map((l) => <option key={l} value={l}>{l}</option>)}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Contact person"><input value={doctorModal.draft.appointmentContact} onChange={(e) => setDraft({ appointmentContact: e.target.value })} placeholder="e.g. Reception / Arun (PA)" className={inputCls} /></Field>
+                  <Field label="Appointment phone"><input value={doctorModal.draft.appointmentPhone} onChange={(e) => setDraft({ appointmentPhone: e.target.value })} placeholder="Phone / WhatsApp number" className={inputCls} /></Field>
+                  <Field label="Appointment note"><input value={doctorModal.draft.appointmentNote} onChange={(e) => setDraft({ appointmentNote: e.target.value })} placeholder="e.g. Call previous evening" className={inputCls} /></Field>
+                </div>
+                <div className="mt-3 rounded-xl border border-sky-200 bg-white/70 p-3">
+                  <p className="mb-2 text-[11px] font-extrabold uppercase tracking-widest text-sky-800">Book in advance — before month date · tap to select</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {APPOINTMENT_MONTH_CUTOFFS.map((opt) => {
+                      const on = doctorModal.draft.appointmentLead === opt;
+                      const short = opt.replace(" of month", "").replace("Before ", "Before ");
+                      return (
+                        <button key={opt} type="button" onClick={() => setDraft({ appointmentLead: opt })} title={opt} className={`rounded-full border px-3 py-1.5 text-xs font-extrabold transition ${on ? "border-sky-600 bg-sky-600 text-white shadow-sm" : "border-sky-200 bg-sky-50 text-sky-800 hover:bg-sky-100"}`}>
+                          {on ? "✓ " : ""}{short}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-2 text-[11px] font-semibold text-slate-500">e.g. Before 20th = book next month slot before 20th · Before 25th = before 25th · all cutoffs available</p>
+                </div>
+                {(doctorModal.draft.appointmentModes || []).length > 0 && (
+                  <div className="mt-3 rounded-xl bg-sky-900 px-4 py-3 text-white">
+                    <p className="text-[10px] font-extrabold uppercase tracking-widest text-sky-300">Appointment preview</p>
+                    <p className="mt-0.5 text-sm font-extrabold">{(doctorModal.draft.appointmentModes || []).join(" · ")}</p>
+                    <p className="text-xs font-semibold text-sky-200">{doctorModal.draft.appointmentLead}{doctorModal.draft.appointmentContact ? ` · ${doctorModal.draft.appointmentContact}` : ""}{doctorModal.draft.appointmentPhone ? ` · ${doctorModal.draft.appointmentPhone}` : ""}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Nutrova products — expandable dropdown card */}
+          <div className="mt-4 rounded-2xl border border-teal-200 bg-teal-50/40 p-3.5 sm:p-4 transition">
+            <button
+              type="button"
+              onClick={() => setModalProductsOpen((v) => !v)}
+              className="flex w-full items-center justify-between text-left"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="flex items-center gap-1.5 text-[12px] font-extrabold uppercase tracking-widest text-teal-900">
+                  <Package className="h-4 w-4 text-teal-700" /> Nutrova products — focus & follow-up
+                </span>
+                {!modalProductsOpen && (
+                  <span className="rounded-full bg-teal-700 text-white text-[11px] font-extrabold px-2.5 py-0.5">
+                    {(doctorModal.draft.focusProducts || []).length} focus · {(doctorModal.draft.followProducts || []).length} follow-up
+                  </span>
+                )}
+              </div>
+              <ChevronDown className={`h-4 w-4 text-teal-700 shrink-0 transition-transform duration-200 ${modalProductsOpen ? "rotate-180" : ""}`} />
+            </button>
+
+            {modalProductsOpen && (
+              <div className="mt-3.5 pt-3.5 border-t border-teal-200/70">
+                <p className="text-xs font-medium text-slate-500">Full names from your uploaded sheet · 25 products · tap to select. Duplicates in the file were merged.</p>
+                <ProductSelector label="Focus products" hint="detail on every visit" icon={<Target className="h-3.5 w-3.5" />} selected={doctorModal.draft.focusProducts || []} onToggle={(n) => toggleProduct("focusProducts", n)} onClear={() => clearDoctorProducts("focusProducts")} accent="emerald" />
+                <ProductSelector label="Follow-up products" hint="Track Rx / feedback" icon={<RefreshCcw className="h-3.5 w-3.5" />} selected={doctorModal.draft.followProducts || []} onToggle={(n) => toggleProduct("followProducts", n)} onClear={() => clearDoctorProducts("followProducts")} accent="amber" />
+              </div>
+            )}
           </div>
 
           <p className="mb-3 mt-6 text-[11px] font-extrabold uppercase tracking-widest text-slate-400">Visit tracking</p>
