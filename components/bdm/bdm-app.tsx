@@ -62,6 +62,8 @@ import {
   exchangeRecoveryCode,
   fetchAll,
   fetchOwnerRoster,
+  fetchOwnerAccounts,
+  type OwnerAccountRow,
   fetchUserWorkspace,
   getRecoverySession,
   getUrlRecoverySignal,
@@ -951,6 +953,12 @@ interface TeamMember {
   city: string;
   phone: string;
   updatedAt: string;
+  /* Account-level facts from Supabase Auth (see sql/05-owner-account-list.sql).
+     hasWorkspace === false means the account exists but has never saved a
+     workspace, so there is no bio row and nothing to open. */
+  hasWorkspace?: boolean;
+  lastSignInAt?: string;
+  emailConfirmed?: boolean;
 }
 interface TeamWorkspace {
   bio: Bio;
@@ -1845,10 +1853,22 @@ export default function App() {
     setTeamLoading(true);
     setTeamError("");
     try {
-      const rows = await fetchOwnerRoster(cfg);
-      const members: TeamMember[] = rows.map((r) => {
+      /* Two sources, merged:
+         1) roster rows  — accounts that HAVE a saved workspace (all we could see
+                           before, which is why an account that signed up but
+                           never saved anything was invisible);
+         2) auth accounts — every account that exists, via the owner-only RPC in
+                           sql/05-owner-account-list.sql. Missing function simply
+                           returns [], so behaviour degrades to the old roster. */
+      const [rows, accounts] = await Promise.all([
+        fetchOwnerRoster(cfg),
+        fetchOwnerAccounts(cfg).catch(() => [] as OwnerAccountRow[]),
+      ]);
+
+      const byId = new Map<string, TeamMember>();
+      rows.forEach((r) => {
         const b = (r.bio || {}) as Partial<Bio>;
-        return {
+        byId.set(r.userId, {
           userId: r.userId,
           name: String(b.name || ""),
           email: String(b.email || ""),
@@ -1857,8 +1877,37 @@ export default function App() {
           city: String(b.city || ""),
           phone: String(b.phone || ""),
           updatedAt: r.updatedAt,
-        };
+          hasWorkspace: true,
+        });
       });
+
+      accounts.forEach((a) => {
+        const existing = byId.get(a.userId);
+        if (existing) {
+          existing.email = existing.email || a.email;
+          existing.name = existing.name || a.displayName;
+          existing.hq = existing.hq || a.hq;
+          existing.lastSignInAt = a.lastSignInAt;
+          existing.emailConfirmed = a.emailConfirmed;
+          return;
+        }
+        // Account exists in Auth but has no workspace rows yet.
+        byId.set(a.userId, {
+          userId: a.userId,
+          name: a.displayName || a.email,
+          email: a.email,
+          role: "",
+          hq: a.hq,
+          city: "",
+          phone: "",
+          updatedAt: "",
+          hasWorkspace: false,
+          lastSignInAt: a.lastSignInAt,
+          emailConfirmed: a.emailConfirmed,
+        });
+      });
+
+      const members = Array.from(byId.values());
       members.sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
       setTeamRoster(members);
     } catch (e) {
@@ -4600,7 +4649,13 @@ export default function App() {
             <div>
               <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Users</h2>
               <p className="mt-1 text-sm font-medium text-slate-500">
-                {teamLoading ? "Loading accounts…" : `${teamRoster.length} account${teamRoster.length === 1 ? "" : "s"} created`} · select a user to see their full workspace
+                {teamLoading
+                  ? "Loading accounts…"
+                  : `${teamRoster.length} account${teamRoster.length === 1 ? "" : "s"} created${
+                      teamRoster.some((m) => m.hasWorkspace === false)
+                        ? ` · ${teamRoster.filter((m) => m.hasWorkspace === false).length} with no data yet`
+                        : ""
+                    }`} · select a user to see their full workspace
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -4831,17 +4886,43 @@ export default function App() {
                 }
                 return (
                   <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {list.map((m) => (
-                      <button key={m.userId} onClick={() => void openTeamMember(m.userId)} className="group flex items-center gap-3 rounded-3xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-emerald-200 hover:shadow-lg">
-                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-700 text-sm font-extrabold text-white">{initials(m.name || m.email || "?")}</div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-[15px] font-extrabold text-slate-900">{m.name || "—"}{m.email.toLowerCase() === APP_OWNER.email.toLowerCase() && <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 align-middle text-[10px] font-extrabold uppercase tracking-wide text-amber-800">Owner</span>}</p>
-                          <p className="truncate text-xs font-semibold text-slate-500">{m.email || "—"}</p>
-                          <p className="truncate text-xs font-semibold text-slate-500">{m.role || "—"}{m.hq ? ` · ${m.hq} HQ` : ""}{m.phone ? ` · ${m.phone}` : ""}</p>
-                        </div>
-                        <ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-emerald-600" />
-                      </button>
-                    ))}
+                    {list.map((m) => {
+                      const isOwnerAccount = m.email.toLowerCase() === APP_OWNER.email.toLowerCase();
+                      const pending = m.hasWorkspace === false;
+                      return (
+                        <button
+                          key={m.userId}
+                          onClick={() => (pending ? undefined : void openTeamMember(m.userId))}
+                          disabled={pending}
+                          title={pending ? "This account has not saved any data yet" : "Open this workspace"}
+                          className={`group flex items-center gap-3 rounded-3xl border p-4 text-left shadow-sm transition ${
+                            pending
+                              ? "cursor-default border-dashed border-slate-300 bg-slate-50/70"
+                              : "border-slate-200 bg-white hover:border-emerald-200 hover:shadow-lg"
+                          }`}
+                        >
+                          <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-sm font-extrabold text-white ${pending ? "bg-slate-400" : "bg-emerald-700"}`}>{initials(m.name || m.email || "?")}</div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-[15px] font-extrabold text-slate-900">
+                              {m.name || m.email || "—"}
+                              {isOwnerAccount && <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 align-middle text-[10px] font-extrabold uppercase tracking-wide text-amber-800">Owner</span>}
+                              {pending && <span className="ml-2 rounded-full bg-slate-200 px-2 py-0.5 align-middle text-[10px] font-extrabold uppercase tracking-wide text-slate-600">No data yet</span>}
+                            </p>
+                            <p className="truncate text-xs font-semibold text-slate-500">{m.email || "—"}</p>
+                            <p className="truncate text-xs font-semibold text-slate-500">
+                              {pending
+                                ? "Account created · signed in but never saved a workspace"
+                                : `${m.role || "—"}${m.hq ? ` · ${m.hq} HQ` : ""}${m.phone ? ` · ${m.phone}` : ""}`}
+                            </p>
+                          </div>
+                          {pending ? (
+                            <span className="shrink-0 text-[10px] font-extrabold uppercase tracking-wide text-slate-400">Empty</span>
+                          ) : (
+                            <ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-emerald-600" />
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
                 );
               })()}
