@@ -32,6 +32,26 @@ html {
   scroll-behavior: auto;
 }
 
+/* Never let the PAGE scroll sideways.
+   One unbreakable run of text (or a wide table) used to widen the document, and
+   on a phone that shifted everything left so the header, body and footer all
+   appeared clipped at the left edge. `clip` blocks the page scroll without
+   creating a scroll container, so the sticky header keeps working; `hidden` is
+   the fallback for older engines. Tables inside their own `overflow-x-auto`
+   wrappers still scroll horizontally, which is what we want. */
+html,
+body {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+@supports not (overflow: clip) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+}
+
 /* Speed: skip offscreen rendering for long lists */
 article, .doc-card {
   content-visibility: auto;
