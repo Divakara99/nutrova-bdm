@@ -3241,11 +3241,24 @@ export default function App() {
                 <h1 className="font-extrabold leading-tight tracking-tight text-[17px] sm:text-2xl">
                   Nutrova Doctor Tracker
                 </h1>
-                {/* tagline — always fully visible, wraps to 2 lines on mobile instead of cutting */}
-                <p className="text-emerald-100/90 mt-1 text-xs leading-snug sm:text-sm">
-                  Created by <span className="font-bold text-white underline decoration-emerald-300/60 underline-offset-2">{APP_OWNER.name}</span>
-                  <span className="mx-1.5 text-emerald-300/60">·</span><span className="whitespace-nowrap">{APP_OWNER.role}</span>
-                  <span className="mx-1.5 text-emerald-300/60">·</span><span className="font-bold text-white">Nutrova</span>
+                {/* tagline — one idea per line on mobile so it never wraps raggedly.
+                   The old version put the whole byline on a single run and marked the
+                   role `whitespace-nowrap`; "Business Development Manager" is ~230px of
+                   unbreakable text, which overflowed the flex column, widened the page
+                   and let the document scroll sideways — the reason the header, body
+                   and footer all looked clipped at the left edge on a phone. */}
+                <p className="text-emerald-100/90 mt-1 text-xs leading-relaxed sm:text-sm">
+                  <span className="block">
+                    Created by{" "}
+                    <span className="font-bold text-white underline decoration-emerald-300/60 underline-offset-2">
+                      {APP_OWNER.name}
+                    </span>
+                  </span>
+                  <span className="block">
+                    {APP_OWNER.role}
+                    <span className="mx-1.5 text-emerald-300/60">·</span>
+                    <span className="font-bold text-white">Nutrova</span>
+                  </span>
                 </p>
               </div>
             </div>
@@ -5131,17 +5144,39 @@ export default function App() {
 
       {/* --------------------------------- footer (dragged down with generous spacing, territory summary removed) --------------------------------- */}
       <footer className="mt-24 sm:mt-32 bg-emerald-950 text-white">
-        <div className="mx-auto flex max-w-7xl flex-col sm:flex-row items-center justify-between gap-4 px-5 py-8 sm:px-8">
-          <div>
-            <p className="flex items-center gap-2 text-base font-extrabold"><Stethoscope className="h-5 w-5 text-emerald-300" /> Nutrova Doctor Tracker</p>
-            <p className="mt-1 text-sm text-emerald-100/70">App created by <span className="font-extrabold text-amber-300">{APP_OWNER.name}</span> · {APP_OWNER.role} · {APP_OWNER.hq} HQ</p>
+        <div className="mx-auto flex w-full max-w-7xl flex-col items-center gap-6 px-5 py-8 text-center sm:flex-row sm:items-start sm:justify-between sm:gap-4 sm:px-8 sm:text-left">
+          <div className="min-w-0 max-w-full">
+            <p className="flex items-center justify-center gap-2 text-base font-extrabold sm:justify-start">
+              <Stethoscope className="h-5 w-5 shrink-0 text-emerald-300" /> Nutrova Doctor Tracker
+            </p>
+            {/* One idea per line: name, then role · HQ. Previously a single
+               unbreakable run wrapped into ragged 3-line blocks with the
+               "CONTACT" block indented to a random position on mobile. */}
+            <p className="mt-1.5 text-sm leading-relaxed text-emerald-100/70">
+              <span className="block">
+                App created by{" "}
+                <span className="font-extrabold text-amber-300">{APP_OWNER.name}</span>
+              </span>
+              <span className="block">
+                {APP_OWNER.role}
+                <span className="mx-1.5 text-emerald-300/60">·</span>
+                {APP_OWNER.hq} HQ
+              </span>
+            </p>
           </div>
-          <div className="text-sm sm:text-right">
+          <div className="min-w-0 max-w-full text-sm sm:text-right">
             <p className="text-xs font-extrabold uppercase tracking-widest text-emerald-300/70">Contact</p>
-            <p className="mt-1 font-medium text-emerald-50"><a className="underline underline-offset-2 hover:text-emerald-200" href={`mailto:${APP_OWNER.email}`}>{APP_OWNER.email}</a></p>
+            <p className="mt-1 font-medium text-emerald-50">
+              <a
+                className="break-words underline underline-offset-2 hover:text-emerald-200"
+                href={`mailto:${APP_OWNER.email}`}
+              >
+                {APP_OWNER.email}
+              </a>
+            </p>
           </div>
         </div>
-        <div className="border-t border-white/10 py-4 text-center text-xs font-medium text-emerald-100/50">
+        <div className="border-t border-white/10 px-5 py-4 text-center text-xs leading-relaxed font-medium text-emerald-100/50">
           Crafted for Nutrova · {APP_OWNER.hq} HQ · Online account data
         </div>
       </footer>
