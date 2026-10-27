@@ -598,7 +598,20 @@ export async function fetchAll(cfg: BackendConfig): Promise<Record<string, unkno
       throw new Error(friendly(last));
     }
     try {
-      const res = await r.client.from("nutrova_store").select("key,value");
+      /* Scope to the signed-in user EXPLICITLY.
+         RLS already restricts ordinary accounts to their own rows, but the
+         owner ("owner reads all" policy) is allowed to SELECT every account's
+         rows. Without this filter fetchAll() returned every team member's
+         row for the same key and the loop below kept only whichever arrived
+         LAST — so the owner's own doctors / reminders / payments could be
+         replaced in the UI by a teammate's workspace, and the next save would
+         then persist that foreign data into the owner's own row.
+         fetchOwnerRoster() + fetchUserWorkspace() remain the owner's
+         read-everyone path, and they already filter by user_id. */
+      const res = await r.client
+        .from("nutrova_store")
+        .select("key,value")
+        .eq("user_id", r.userId);
       if (res.error) {
         last = res.error.message;
         if (isKeyError(last)) continue;

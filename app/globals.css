@@ -3,6 +3,17 @@
    The BDM tracker + all helper pages depend on this light theme. */
 @import "tailwindcss";
 
+/* Font variables previously injected by next/font/google. Declared here so the
+   build no longer needs to reach fonts.googleapis.com; if Inter / Plus Jakarta
+   Sans happen to be installed locally they are used, otherwise the system UI
+   stack renders — identical layout, no network dependency, no build failure. */
+:root {
+  --font-inter: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-jakarta: "Plus Jakarta Sans", "Inter", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, sans-serif;
+}
+
 @theme {
   --font-sans: var(--font-inter), "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --color-background: #ffffff;

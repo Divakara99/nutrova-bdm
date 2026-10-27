@@ -539,6 +539,29 @@ interface SyncCtx {
 }
 const STORE_KEYS = ["nutrova-bio-v1", "nutrova-doctors-v3", "nutrova-patches-v2", "nutrova-reminders-v1", "nutrova-payments-v3"];
 
+/* Remove every cached dataset for every account on this device.
+
+   useSynced() stores its offline copy under `${key}::${ownerKey}`, but
+   sign-out only removed the UNSCOPED keys — so signing out left the previous
+   account's doctors, payments and reminders sitting in localStorage under
+   e.g. "nutrova-doctors-v3::cloud:divakar.reddy@nutrova.com". Nothing in the
+   app reads those for a different account, but they are still this account's
+   data readable on a shared phone. Clearing the unscoped key and every scoped
+   variant guarantees the next person starts from nothing. */
+function clearDeviceCaches() {
+  try {
+    const doomed: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (STORE_KEYS.some((base) => k === base || k.startsWith(`${base}::`))) doomed.push(k);
+    }
+    doomed.forEach((k) => localStorage.removeItem(k));
+  } catch {
+    /* ignore */
+  }
+}
+
 function useSynced<T>(
   key: string,
   seed: () => T,
@@ -2075,6 +2098,25 @@ export default function App() {
       if (users.some((u) => u.email.toLowerCase() === email)) return setAuthError("Account already exists — please Sign in");
       return handleSignupLocal();
     }
+    /* Start the new account from a CLEAN SLATE.
+
+       Supabase returns no session when "Confirm email" is enabled (it is on by
+       default), so signUpRemote() resolved to needsConfirm and NO new session
+       was ever set — leaving whoever was already signed in on this device
+       (usually the owner) still active, with their doctors, payments and
+       reminders on screen. Someone who had just "created an account" was
+       therefore looking at the owner's data.
+
+       Sign the previous account out of this device, drop its cached copies and
+       clear the loaded map before creating the account. The new account then
+       loads its own (empty) workspace from the cloud. */
+    persistSession("");
+    setSession(null);
+    setRemote(null);
+    setRemoteOwnerKey("");
+    setSyncState("idle");
+    clearDeviceCaches();
+    try { await signOutRemote(cfg); } catch { /* account creation can still proceed */ }
     setAuthBusy(true);
     try {
       const r = await signUpRemote(cfg, name, email, signupPassword, hq);
@@ -2159,7 +2201,7 @@ export default function App() {
     if (online) {
       /* clear the cached copy so the next person on this phone never sees this account's data */
       clearSession();
-      try { STORE_KEYS.forEach((k) => localStorage.removeItem(k)); } catch { /* ignore */ }
+      clearDeviceCaches();
       window.location.reload();
       return;
     }
