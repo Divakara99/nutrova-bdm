@@ -688,16 +688,31 @@ export interface OwnerAccountRow {
    caller's email server-side — the browser has no service_role key and must
    never get one. Returns an empty list (not an error) if the function has not
    been installed yet, so the Users tab still works from roster rows alone. */
-export async function fetchOwnerAccounts(cfg: BackendConfig): Promise<OwnerAccountRow[]> {
+export interface OwnerAccountsResult {
+  rows: OwnerAccountRow[];
+  /* Set when the RPC could not be used. The Users tab shows this so an account
+     with no saved workspace never disappears silently again. */
+  error: string;
+}
+
+export async function fetchOwnerAccounts(cfg: BackendConfig): Promise<OwnerAccountsResult> {
   const r = await ready(clientFor(cfg.url, cfg.key));
-  if (!r.ok) throw new Error(r.error);
+  if (!r.ok) return { rows: [], error: r.error };
   const res = await r.client.rpc("owner_list_accounts");
   if (res.error) {
-    // Missing function / not permitted: degrade quietly, roster rows still list.
-    if (/owner_list_accounts|does not exist|PGRST202|permission denied/i.test(res.error.message || "")) return [];
-    throw new Error(friendly(res.error.message));
+    const msg = res.error.message || "";
+    /* PGRST202 = "Could not find the function ... in the schema cache". PostgREST
+       caches the schema, so a freshly created function can be invisible until the
+       cache reloads — fixed in SQL with: notify pgrst, 'reload schema'; */
+    if (/PGRST202|schema cache/i.test(msg))
+      return { rows: [], error: "Account function not visible yet — run: notify pgrst, 'reload schema'; in Supabase." };
+    if (/owner_list_accounts|does not exist/i.test(msg))
+      return { rows: [], error: "Owners-only account list is not installed — run sql/05-owner-account-list.sql in Supabase." };
+    if (/permission denied/i.test(msg))
+      return { rows: [], error: "Account list blocked — check the grant execute statement in sql/05-owner-account-list.sql." };
+    return { rows: [], error: friendly(msg) };
   }
-  return ((res.data || []) as Record<string, unknown>[]).map((row) => ({
+  const rows = ((res.data || []) as Record<string, unknown>[]).map((row) => ({
     userId: String(row.user_id || ""),
     email: String(row.email || ""),
     displayName: String(row.display_name || ""),
@@ -706,6 +721,7 @@ export async function fetchOwnerAccounts(cfg: BackendConfig): Promise<OwnerAccou
     lastSignInAt: String(row.last_sign_in_at || ""),
     emailConfirmed: row.email_confirmed === true,
   }));
+  return { rows, error: "" };
 }
 
 /* Owner-only: list every account's profile row. Works only after the
