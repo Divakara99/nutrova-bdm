@@ -3165,7 +3165,7 @@ export default function App() {
                 <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Work email</label>
                 <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
                   <Mail className="h-4 w-4 shrink-0 text-emerald-600" />
-                  <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleLogin()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" autoComplete="email" />
+                  <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleLogin()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" type="email" inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false} />
                 </div>
               </div>
               <div>
@@ -3208,7 +3208,7 @@ export default function App() {
                 <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Work email</label>
                 <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
                   <Mail className="h-4 w-4 shrink-0 text-slate-400" />
-                  <input value={signupEmail} onChange={(e) => setSignupEmail(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" autoComplete="email" />
+                  <input value={signupEmail} onChange={(e) => setSignupEmail(e.target.value)} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" type="email" inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false} />
                 </div>
               </div>
               <div>
@@ -3262,7 +3262,7 @@ export default function App() {
                 <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">Account email</label>
                 <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 px-4 py-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
                   <Mail className="h-4 w-4 shrink-0 text-emerald-600" />
-                  <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleForgotPassword()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" autoComplete="email" />
+                  <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleForgotPassword()} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none" placeholder="you@nutrova.com" type="email" inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false} />
                 </div>
               </div>
               {authInfo && <p className="rounded-xl bg-emerald-50 px-4 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-200">{authInfo}</p>}
@@ -3293,7 +3293,7 @@ export default function App() {
           />
         )}
         {toast && (
-          <div className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 anim-toast">
+          <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 z-[60] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 anim-toast">
             <div className="flex items-center gap-2.5 rounded-full bg-emerald-950 py-3 pl-4 pr-6 text-sm font-bold text-white shadow-2xl ring-1 ring-white/10">
               <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500">
                 <Check className="h-4 w-4" strokeWidth={3} />
@@ -3410,7 +3410,7 @@ export default function App() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="flex-1 space-y-1 overflow-y-auto p-3">
+            <div className="flex-1 space-y-1 overflow-y-auto p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               {drawerItems.map((d) => (
                 <button
                   key={d.id}
@@ -3740,9 +3740,9 @@ export default function App() {
                   <BioInput label="City" value={bioDraft.city} onChange={(v) => setBioDraft({ ...bioDraft, city: v })} placeholder="Your city" />
                   <BioInput label="State" value={bioDraft.state} onChange={(v) => setBioDraft({ ...bioDraft, state: v })} placeholder="Your state" />
                   <BioInput label="HQ" value={bioDraft.hq} onChange={(v) => setBioDraft({ ...bioDraft, hq: v })} placeholder="Your HQ" />
-                  <BioInput label="Phone" value={bioDraft.phone} onChange={(v) => setBioDraft({ ...bioDraft, phone: v })} placeholder="Phone" />
+                  <BioInput label="Phone" kind="tel" value={bioDraft.phone} onChange={(v) => setBioDraft({ ...bioDraft, phone: v })} placeholder="Phone" />
                   <div className="sm:col-span-2">
-                    <BioInput label="Email" value={bioDraft.email} onChange={(v) => setBioDraft({ ...bioDraft, email: v })} placeholder="you@nutrova.com" />
+                    <BioInput label="Email" kind="email" value={bioDraft.email} onChange={(v) => setBioDraft({ ...bioDraft, email: v })} placeholder="you@nutrova.com" />
                   </div>
                 </div>
                 <button onClick={saveBio} className="mt-4 w-full rounded-2xl bg-emerald-700 py-3 text-sm font-extrabold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-800 active:scale-[0.99] sm:w-auto sm:px-10">
@@ -5359,8 +5359,8 @@ export default function App() {
             <Field label="Specialty *"><select value={doctorModal.draft.specialty} onChange={(e) => setDraft({ specialty: e.target.value })} className={inputCls}>{SPECIALTIES.map((s) => <option key={s}>{s}</option>)}</select></Field>
             <Field label="Qualification"><input value={doctorModal.draft.qualification} onChange={(e) => setDraft({ qualification: e.target.value })} placeholder="MBBS, MD Derma" className={inputCls} /></Field>
             <Field label="Hospital / Clinic"><input value={doctorModal.draft.clinic} onChange={(e) => setDraft({ clinic: e.target.value })} placeholder="SkinGlow Aesthetics" className={inputCls} /></Field>
-            <Field label="Phone"><input value={doctorModal.draft.phone} onChange={(e) => setDraft({ phone: e.target.value })} placeholder="98XXX XXXXX" className={inputCls} /></Field>
-            <Field label="Email"><input value={doctorModal.draft.email} onChange={(e) => setDraft({ email: e.target.value })} placeholder="doctor@clinic.in" className={inputCls} /></Field>
+            <Field label="Phone"><input value={doctorModal.draft.phone} onChange={(e) => setDraft({ phone: e.target.value })} placeholder="98XXX XXXXX" type="tel" inputMode="tel" autoComplete="tel" className={inputCls} /></Field>
+            <Field label="Email"><input value={doctorModal.draft.email} onChange={(e) => setDraft({ email: e.target.value })} placeholder="doctor@clinic.in" type="email" inputMode="email" autoComplete="email" className={inputCls} /></Field>
           </div>
 
           {/* patch = area name only */}
@@ -5533,7 +5533,7 @@ export default function App() {
                     </select>
                   </Field>
                   <Field label="Contact person"><input value={doctorModal.draft.appointmentContact} onChange={(e) => setDraft({ appointmentContact: e.target.value })} placeholder="e.g. Reception / Arun (PA)" className={inputCls} /></Field>
-                  <Field label="Appointment phone"><input value={doctorModal.draft.appointmentPhone} onChange={(e) => setDraft({ appointmentPhone: e.target.value })} placeholder="Phone / WhatsApp number" className={inputCls} /></Field>
+                  <Field label="Appointment phone"><input value={doctorModal.draft.appointmentPhone} onChange={(e) => setDraft({ appointmentPhone: e.target.value })} placeholder="Phone / WhatsApp number" type="tel" inputMode="tel" autoComplete="tel" className={inputCls} /></Field>
                   <Field label="Appointment note"><input value={doctorModal.draft.appointmentNote} onChange={(e) => setDraft({ appointmentNote: e.target.value })} placeholder="e.g. Call previous evening" className={inputCls} /></Field>
                 </div>
                 <div className="mt-3 rounded-xl border border-sky-200 bg-white/70 p-3">
@@ -5948,7 +5948,7 @@ export default function App() {
 
       {/* toast */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 anim-toast">
+        <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 z-[60] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 anim-toast">
           <div className="flex items-center gap-2.5 rounded-full bg-emerald-950 py-3 pl-4 pr-6 text-sm font-bold text-white shadow-2xl ring-1 ring-white/10">
             <span className={`flex h-7 w-7 items-center justify-center rounded-full ${toast.kind === "ok" ? "bg-emerald-500" : "bg-amber-400 text-amber-950"}`}>
               {toast.kind === "ok" ? <Check className="h-4 w-4" strokeWidth={3} /> : <Bell className="h-4 w-4" strokeWidth={2.5} />}
@@ -5966,18 +5966,37 @@ export default function App() {
 const inputCls =
   "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-medium text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100";
 
-function BioInput({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder: string }) {
+/* MOBILE KEYBOARD HINTS.
+   Every field was a plain <input> with no type/inputMode, so a phone showed the
+   full QWERTY keyboard even for phone numbers and email addresses — the worst of
+   it being that the number row is not even a keypad, so entering 10-digit
+   numbers meant hunting for digits. `kind` picks the right keyboard:
+     tel   -> numeric keypad, tel autocomplete
+     email -> @ and . on the primary keyboard, email autocomplete
+   type="tel" (not number) keeps leading zeros and spacing intact. */
+function BioInput({ label, value, onChange, placeholder, kind = "text" }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder: string;
+  kind?: "text" | "tel" | "email";
+}) {
   return (
     <label className="block">
       <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-widest text-slate-400">{label}</span>
-      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="w-full rounded-2xl border border-emerald-200 bg-white px-4 py-3 text-[15px] font-medium text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        type={kind === "text" ? "text" : kind}
+        inputMode={kind === "tel" ? "tel" : kind === "email" ? "email" : undefined}
+        autoComplete={kind === "tel" ? "tel" : kind === "email" ? "email" : undefined}
+        className="w-full rounded-2xl border border-emerald-200 bg-white px-4 py-3 text-[15px] font-medium text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+      />
     </label>
   );
 }
 
 function IconBtn({ children, onClick, title, danger }: { children: ReactNode; onClick: () => void; title: string; danger?: boolean }) {
   return (
-    <button title={title} onClick={onClick} className={`flex h-9 w-9 items-center justify-center rounded-xl border transition ${danger ? "border-slate-200 text-slate-400 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600" : "border-slate-200 text-slate-400 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700"}`}>
+    <button title={title} aria-label={title} onClick={onClick} className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition sm:h-9 sm:w-9 ${danger ? "border-slate-200 text-slate-400 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600" : "border-slate-200 text-slate-400 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700"}`}>
       {children}
     </button>
   );
@@ -6164,7 +6183,10 @@ function Modal({ title, children, onClose, wide }: { title: string; children: Re
   }, [onClose]);
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/45 p-0 backdrop-blur-sm sm:items-center sm:p-6" onClick={onClose}>
-      <div className={`anim-pop max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-white p-6 shadow-2xl sm:rounded-3xl sm:p-7 ${wide ? "max-w-3xl" : "max-w-2xl"}`} onClick={(e) => e.stopPropagation()}>
+      <div
+        className={`anim-pop max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-white p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl sm:max-h-[90vh] sm:rounded-3xl sm:p-7 sm:pb-7 ${wide ? "max-w-3xl" : "max-w-2xl"}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="mb-5 flex items-center justify-between">
           <h3 className="text-xl font-extrabold tracking-tight text-slate-900">{title}</h3>
           <button onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200"><X className="h-4 w-4" /></button>

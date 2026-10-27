@@ -3,10 +3,37 @@
    The BDM tracker + all helper pages depend on this light theme. */
 @import "tailwindcss";
 
-/* Font variables previously injected by next/font/google. Declared here so the
-   build no longer needs to reach fonts.googleapis.com; if Inter / Plus Jakarta
-   Sans happen to be installed locally they are used, otherwise the system UI
-   stack renders — identical layout, no network dependency, no build failure. */
+/* SELF-HOSTED FONTS.
+   These were previously fetched from fonts.googleapis.com by next/font/google,
+   which hard-failed the build whenever that host was unreachable. Removing it
+   left the app on the system fallback, and on several Android phones that
+   fallback rendered slanted/synthesised — the "italic" body text that kept
+   showing up in screenshots.
+   Both families are now served from /public/fonts as variable woff2 (one file
+   per family, weights 100-900, ~75 KB total, latin subset only). No network
+   dependency at build or runtime, and identical rendering on every device.
+   Licences: public/fonts/OFL-*.txt (SIL Open Font License 1.1). */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-latin-variable.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("/fonts/plus-jakarta-sans-latin-variable.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   --font-inter: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
@@ -74,6 +101,27 @@ body {
 article, .doc-card {
   content-visibility: auto;
   contain-intrinsic-size: auto 320px;
+}
+
+/* iOS: stop the rubber-band / pinch-zoom jitter on form use, and give the
+   app a sensible floor for text scaling without breaking the layout.
+   -webkit-text-size-adjust prevents Safari from inflating text when the phone
+   is rotated; 16px minimum on inputs prevents the "zoom in on focus" jump that
+   made the Add Doctor form feel broken on iPhone. */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Safari zooms the page whenever a focused input is under 16px, and it does
+   not zoom back out — the Add Doctor form ended up stuck at 1.2x. Phones only
+   get a 16px floor on fields; desktop keeps its exact dense sizing. */
+@media (max-width: 640px) {
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1em);
+  }
 }
 
 body {

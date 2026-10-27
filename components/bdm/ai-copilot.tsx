@@ -1053,7 +1053,7 @@ export function AiCopilot({
         {!isConversationHidden && (
           <div
             ref={chatBoxRef}
-            className="rounded-3xl border border-slate-200 bg-slate-50 p-4 sm:p-5 shadow-inner min-h-[360px] max-h-[520px] overflow-y-auto space-y-4"
+            className="min-h-[240px] max-h-[60vh] space-y-4 overflow-y-auto rounded-3xl border border-slate-200 bg-slate-50 p-4 shadow-inner sm:min-h-[360px] sm:max-h-[520px] sm:p-5"
           >
             {messages.map((m) => {
               const isUser = m.sender === "user";
