@@ -672,6 +672,42 @@ export interface TeamRosterRow {
   updatedAt: string;
 }
 
+export interface OwnerAccountRow {
+  userId: string;
+  email: string;
+  displayName: string;
+  hq: string;
+  createdAt: string;
+  lastSignInAt: string;
+  emailConfirmed: boolean;
+}
+
+/* Owner-only: every account that exists in Supabase Auth, including accounts
+   that have never saved a workspace. Reads public.owner_list_accounts(), a
+   SECURITY DEFINER function (sql/05-owner-account-list.sql) that re-checks the
+   caller's email server-side — the browser has no service_role key and must
+   never get one. Returns an empty list (not an error) if the function has not
+   been installed yet, so the Users tab still works from roster rows alone. */
+export async function fetchOwnerAccounts(cfg: BackendConfig): Promise<OwnerAccountRow[]> {
+  const r = await ready(clientFor(cfg.url, cfg.key));
+  if (!r.ok) throw new Error(r.error);
+  const res = await r.client.rpc("owner_list_accounts");
+  if (res.error) {
+    // Missing function / not permitted: degrade quietly, roster rows still list.
+    if (/owner_list_accounts|does not exist|PGRST202|permission denied/i.test(res.error.message || "")) return [];
+    throw new Error(friendly(res.error.message));
+  }
+  return ((res.data || []) as Record<string, unknown>[]).map((row) => ({
+    userId: String(row.user_id || ""),
+    email: String(row.email || ""),
+    displayName: String(row.display_name || ""),
+    hq: String(row.hq || ""),
+    createdAt: String(row.created_at || ""),
+    lastSignInAt: String(row.last_sign_in_at || ""),
+    emailConfirmed: row.email_confirmed === true,
+  }));
+}
+
 /* Owner-only: list every account's profile row. Works only after the
    "owner reads all" policy from SETUP_SQL has been run in Supabase. */
 export async function fetchOwnerRoster(cfg: BackendConfig): Promise<TeamRosterRow[]> {
