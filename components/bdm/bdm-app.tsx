@@ -3330,7 +3330,7 @@ export default function App() {
                 <Stethoscope className="h-5 w-5 sm:h-6 sm:w-6 text-emerald-300" />
               </div>
               <div className="min-w-0 flex-1">
-                <h1 className="font-extrabold leading-tight tracking-tight text-[21px] sm:text-[26px]">
+                <h1 className="font-black leading-[1.15] tracking-tight text-[24px] break-words sm:text-[31px]">
                   Nutrova Doctor Tracker
                 </h1>
                 {/* tagline — one idea per line on mobile so it never wraps raggedly.
@@ -3339,7 +3339,7 @@ export default function App() {
                    unbreakable text, which overflowed the flex column, widened the page
                    and let the document scroll sideways — the reason the header, body
                    and footer all looked clipped at the left edge on a phone. */}
-                <p className="text-emerald-100/90 mt-1 text-xs leading-relaxed sm:text-sm">
+                <p className="text-emerald-100/90 mt-1 text-[13px] leading-relaxed sm:text-[15px]">
                   <span className="block">
                     Created by{" "}
                     <span className="font-bold text-white underline decoration-emerald-300/60 underline-offset-2">
