@@ -28,6 +28,24 @@
   --color-nutrova-950: #022c22;
 }
 
+/* App shell: full-height flex column so the footer is pinned to the bottom of
+   the screen on short pages (the Users tab has only a couple of cards, so the
+   footer used to float mid-page with a white void underneath it) while still
+   sitting after the content on long ones. `main` is the flex child that grows.
+
+   min-height is declared twice on purpose: browsers that do not understand dvh
+   ignore the second line and keep 100vh, so small phones with a collapsing
+   address bar no longer cut the footer off. */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.app-shell > main {
+  flex: 1 0 auto;
+}
+
 html {
   scroll-behavior: auto;
 }

@@ -1371,6 +1371,10 @@ export default function App() {
   /* Owner-only team view state */
   const [teamRoster, setTeamRoster] = useState<TeamMember[]>([]);
   const [teamLoading, setTeamLoading] = useState(false);
+  /* Why the owner-only account list could not be loaded (missing RPC, PostgREST
+     schema cache, permissions). Surfaced in the Users tab so an account with no
+     saved workspace can never vanish silently. */
+  const [teamAccountsWarning, setTeamAccountsWarning] = useState("");
   const [teamError, setTeamError] = useState("");
   const [teamSearch, setTeamSearch] = useState("");
   const [selectedUserId, setSelectedUserId] = useState("");
@@ -1860,10 +1864,17 @@ export default function App() {
          2) auth accounts — every account that exists, via the owner-only RPC in
                            sql/05-owner-account-list.sql. Missing function simply
                            returns [], so behaviour degrades to the old roster. */
-      const [rows, accounts] = await Promise.all([
+      const [rows, accountResult] = await Promise.all([
         fetchOwnerRoster(cfg),
-        fetchOwnerAccounts(cfg).catch(() => [] as OwnerAccountRow[]),
+        fetchOwnerAccounts(cfg).catch(
+          (e: unknown): { rows: OwnerAccountRow[]; error: string } => ({
+            rows: [],
+            error: e instanceof Error ? e.message : "Could not load the account list",
+          })
+        ),
       ]);
+      const accounts = accountResult.rows;
+      setTeamAccountsWarning(accountResult.error);
 
       const byId = new Map<string, TeamMember>();
       rows.forEach((r) => {
@@ -3309,7 +3320,7 @@ export default function App() {
   ];
 
   return (
-    <div className="min-h-screen bg-white text-slate-900">
+    <div className="app-shell bg-white text-slate-900">
       {/* --------------------- FROZEN: top banner + nav pills (upto marked line) --------------------- */}
       <div className={`sticky top-0 z-40 transition-shadow duration-200 ${frozenScrolled ? "shadow-lg shadow-slate-900/10" : ""}`}>
         <header className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-800 text-white">
@@ -4657,6 +4668,12 @@ export default function App() {
                         : ""
                     }`} · select a user to see their full workspace
               </p>
+              {!teamLoading && teamAccountsWarning && (
+                <div className="mt-2 flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-[11px] font-bold leading-snug text-amber-800 ring-1 ring-amber-200">
+                  <Bell className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>Showing saved workspaces only. {teamAccountsWarning}</span>
+                </div>
+              )}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button onClick={() => { setSelectedUserId(""); setSelectedWorkspace(null); setSelectedError(""); void loadTeamRoster(); }} title="Reload users" className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-600 shadow-sm transition hover:border-emerald-300 hover:text-emerald-700">
