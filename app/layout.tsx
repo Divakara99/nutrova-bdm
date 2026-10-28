@@ -6,13 +6,10 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
-/* FONTS — no longer fetched from Google Fonts at build time.
-   next/font/google contacted fonts.googleapis.com during `next build`, which
-   hard-failed the build whenever that host was unreachable (offline machines,
-   locked-down CI, preview sandboxes) and added a blocking network dependency to
-   every cold build. globals.css now defines --font-inter / --font-jakarta with
-   Inter + Plus Jakarta Sans first and a system stack as the fallback, so the
-   light theme and type scale stay identical without the build-time fetch. */
+/* FONTS — self-hosted variable woff2 files in /public/fonts (defined in
+   globals.css). Preloaded in <head> below so the first paint already uses
+   Inter + Plus Jakarta Sans without a system-font FOUT swap or any build-time
+   network dependency on fonts.googleapis.com. */
 
 export const metadata: Metadata = {
   title: "Nutrova Doctor Tracker",
@@ -35,13 +32,46 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
-/* Self-healing watchdog. Lives in the HTML itself, so it still runs even if
-   the React bundle fails to execute (e.g. a stale service worker served HTML
-   in place of a JS chunk — the exact cause of the stuck "Loading your
-   workspace…" screen). If the app has not mounted within 20s it unregisters
-   every service worker, clears all caches, and reloads ONCE. */
-const RECOVERY_SCRIPT = `
+/* Synchronous pre-paint boot + self-healing watchdog.
+   1) Runs in <head> BEFORE <body> paints, setting:
+      - html.android-phone (so Android phone font scaling never jumps post-mount)
+      - html[data-nutrova-boot="in"|"out"] from localStorage + URL recovery params,
+        so CSS immediately reveals the matching shell (white Dashboard shell when
+        signed in, emerald Login shell when signed out) on the very first paint —
+        eliminating the dark-emerald splash -> white page flash on refresh.
+   2) Watchdog: if the real BDM app has not mounted within 20s (e.g. a stale
+      service worker served HTML in place of a JS chunk), unregisters all
+      service workers, clears caches, and reloads ONCE. */
+const BOOT_AND_RECOVERY_SCRIPT = `
 (function () {
+  var boot = 'out';
+  try {
+    var ua = navigator.userAgent || '';
+    if (/Android/i.test(ua) && /Mobile/i.test(ua) && window.innerWidth < 640) {
+      document.documentElement.classList.add('android-phone');
+    }
+  } catch (e) {}
+  try {
+    var pendingRec = false;
+    try { pendingRec = !!localStorage.getItem('nutrova-password-reset-pending-v1'); } catch (e) {}
+    var h = window.location.hash || '';
+    var q = window.location.search || '';
+    var inRec = pendingRec ||
+      /[#?&](error|error_description|error_message)=/i.test(h + q) ||
+      /[#?&](type|auth)=(recovery|reset)(?:&|$)/i.test(h + q);
+    if (!inRec) {
+      var rawSess = localStorage.getItem('nutrova-backend-session-v1');
+      if (rawSess) {
+        var parsed = JSON.parse(rawSess);
+        if (parsed && typeof parsed.access_token === 'string' && parsed.access_token.length > 0) {
+          boot = 'in';
+        }
+      }
+    }
+  } catch (e) {}
+  try {
+    document.documentElement.setAttribute('data-nutrova-boot', boot);
+  } catch (e) {}
   try {
     var KEY = 'nutrova-sw-recovered-v1';
     window.__NUTROVA_MOUNTED__ = false;
@@ -76,9 +106,23 @@ const RECOVERY_SCRIPT = `
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="bg-background">
+    <html lang="en" className="bg-background" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: RECOVERY_SCRIPT }} />
+        <link
+          rel="preload"
+          href="/fonts/inter-latin-variable.woff2"
+          as="font"
+          type="font/woff2"
+          crossOrigin="anonymous"
+        />
+        <link
+          rel="preload"
+          href="/fonts/plus-jakarta-sans-latin-variable.woff2"
+          as="font"
+          type="font/woff2"
+          crossOrigin="anonymous"
+        />
+        <script dangerouslySetInnerHTML={{ __html: BOOT_AND_RECOVERY_SCRIPT }} />
       </head>
       <body className="antialiased">{children}</body>
     </html>

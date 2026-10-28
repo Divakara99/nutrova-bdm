@@ -1,4 +1,139 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { getServerBackendConfig } from "@/components/bdm/backend";
+
+const MAX_BODY_BYTES = 16_384;
+const MAX_MESSAGE_CHARS = 1_500;
+const MAX_FIELD_CHARS = 120;
+const ALLOWED_MODES = new Set(["highlights", "full", "voice"]);
+const ALLOWED_LANGS = new Set(["auto", "kn-IN", "te-IN", "ta-IN", "ml-IN", "hi-IN", "en-IN"]);
+
+/* Bounded in-memory sliding-window rate limiters (per-IP pre-auth + per-user post-auth).
+   Serverless warm instances enforce burst protection immediately without requiring
+   external credentials; stale buckets are evicted so memory stays strictly bounded. */
+const IP_WINDOW_MS = 60_000;
+const IP_MAX_REQUESTS = 20;
+const USER_MINUTE_WINDOW_MS = 60_000;
+const USER_MINUTE_MAX_REQUESTS = 15;
+const USER_HOUR_WINDOW_MS = 3_600_000;
+const USER_HOUR_MAX_REQUESTS = 120;
+const MAX_RATE_BUCKETS = 4_096;
+
+const ipBuckets = new Map<string, number[]>();
+const userMinuteBuckets = new Map<string, number[]>();
+const userHourBuckets = new Map<string, number[]>();
+
+function consumeRateLimit(
+  store: Map<string, number[]>,
+  key: string,
+  limit: number,
+  windowMs: number,
+  now = Date.now()
+): { allowed: boolean; remaining: number; retryAfterSec: number } {
+  const cutoff = now - windowMs;
+  const existing = store.get(key);
+  const recent = existing ? existing.filter((ts) => ts > cutoff) : [];
+
+  if (recent.length >= limit) {
+    store.set(key, recent);
+    const oldest = recent[0] ?? now;
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+    return { allowed: false, remaining: 0, retryAfterSec };
+  }
+
+  recent.push(now);
+  store.set(key, recent);
+
+  if (store.size > MAX_RATE_BUCKETS) {
+    for (const [k, timestamps] of store) {
+      const filtered = timestamps.filter((ts) => ts > cutoff);
+      if (filtered.length === 0) store.delete(k);
+      else store.set(k, filtered);
+      if (store.size <= MAX_RATE_BUCKETS / 2) break;
+    }
+    if (store.size > MAX_RATE_BUCKETS) {
+      const firstKey = store.keys().next().value;
+      if (firstKey !== undefined) store.delete(firstKey);
+    }
+  }
+
+  return { allowed: true, remaining: Math.max(0, limit - recent.length), retryAfterSec: 0 };
+}
+
+function getClientIp(req: NextRequest): string {
+  const nfIp = req.headers.get("x-nf-client-connection-ip");
+  if (nfIp) return nfIp.trim().slice(0, 64);
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first) return first.slice(0, 64);
+  }
+  const realIp = req.headers.get("x-real-ip");
+  if (realIp) return realIp.trim().slice(0, 64);
+  return "unknown";
+}
+
+function isSameOrigin(req: NextRequest): boolean {
+  const origin = req.headers.get("origin");
+  if (!origin) return true;
+  const expectedHost = (req.headers.get("x-forwarded-host") || req.headers.get("host") || "")
+    .split(",")[0]
+    ?.trim()
+    .toLowerCase();
+  if (!expectedHost) return true;
+  try {
+    return new URL(origin).host.toLowerCase() === expectedHost;
+  } catch {
+    return false;
+  }
+}
+
+let cachedAuthClients: SupabaseClient[] | null = null;
+function getAuthClients(): SupabaseClient[] {
+  if (cachedAuthClients) return cachedAuthClients;
+  const { url, key } = getServerBackendConfig();
+  const k = key.trim();
+  const candidates = [k];
+  if (/^sb_/i.test(k)) {
+    candidates.push("sb_" + k.slice(3), "Sb_" + k.slice(3));
+  }
+  const uniqueKeys = candidates.filter((v, i, a) => Boolean(v) && a.indexOf(v) === i);
+  cachedAuthClients = uniqueKeys.map((candidateKey) =>
+    createClient(url, candidateKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    })
+  );
+  return cachedAuthClients;
+}
+
+async function verifySupabaseJwt(token: string): Promise<{ userId: string } | null> {
+  if (!token || token.length > 8_192) return null;
+  for (const client of getAuthClients()) {
+    try {
+      const result = await Promise.race([
+        client.auth.getClaims(token),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+      ]);
+      if (!result || result.error || !result.data?.claims) continue;
+      const claims = result.data.claims as Record<string, unknown>;
+      const sub = typeof claims.sub === "string" ? claims.sub.trim() : "";
+      const role = typeof claims.role === "string" ? claims.role : "authenticated";
+      if (sub && role === "authenticated") {
+        return { userId: sub };
+      }
+    } catch {
+      /* try next key candidate if any */
+    }
+  }
+  return null;
+}
+
+function cleanShortText(val: unknown, max = MAX_FIELD_CHARS): string {
+  if (typeof val !== "string") return "";
+  return val.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, max);
+}
+
+const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
 
 
 // Models prioritized by active quota availability
@@ -221,11 +356,165 @@ function detectLangCode(query: string, reply: string, userExplicitLang?: string)
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, doctorContext, selectedProduct, mode, preferredLang } = await req.json();
-
-    if (!message || typeof message !== "string") {
-      return NextResponse.json({ error: "Message is required" }, { status: 400 });
+    if (!isSameOrigin(req)) {
+      return NextResponse.json(
+        { error: "Cross-origin requests are not allowed" },
+        { status: 403, headers: NO_STORE_HEADERS }
+      );
     }
+
+    const clientIp = getClientIp(req);
+    const ipLimit = consumeRateLimit(ipBuckets, clientIp, IP_MAX_REQUESTS, IP_WINDOW_MS);
+    if (!ipLimit.allowed) {
+      return NextResponse.json(
+        { error: "Too many AI requests from this network — please wait a moment and try again." },
+        {
+          status: 429,
+          headers: {
+            ...NO_STORE_HEADERS,
+            "Retry-After": String(ipLimit.retryAfterSec),
+          },
+        }
+      );
+    }
+
+    const authHeader = req.headers.get("authorization") || "";
+    const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+    const accessToken = bearerMatch?.[1]?.trim() || "";
+    if (!accessToken) {
+      return NextResponse.json(
+        { error: "Authentication required — please sign in to use AI Copilot." },
+        {
+          status: 401,
+          headers: { ...NO_STORE_HEADERS, "WWW-Authenticate": 'Bearer realm="nutrova-ai"' },
+        }
+      );
+    }
+
+    const verified = await verifySupabaseJwt(accessToken);
+    if (!verified) {
+      return NextResponse.json(
+        { error: "Your login session expired or is invalid — please sign in again." },
+        {
+          status: 401,
+          headers: { ...NO_STORE_HEADERS, "WWW-Authenticate": 'Bearer error="invalid_token"' },
+        }
+      );
+    }
+
+    const userMinLimit = consumeRateLimit(
+      userMinuteBuckets,
+      verified.userId,
+      USER_MINUTE_MAX_REQUESTS,
+      USER_MINUTE_WINDOW_MS
+    );
+    if (!userMinLimit.allowed) {
+      return NextResponse.json(
+        { error: `Rate limit reached — please wait ${userMinLimit.retryAfterSec}s before sending another query.` },
+        {
+          status: 429,
+          headers: {
+            ...NO_STORE_HEADERS,
+            "Retry-After": String(userMinLimit.retryAfterSec),
+            "X-RateLimit-Remaining": "0",
+          },
+        }
+      );
+    }
+
+    const userHrLimit = consumeRateLimit(
+      userHourBuckets,
+      verified.userId,
+      USER_HOUR_MAX_REQUESTS,
+      USER_HOUR_WINDOW_MS
+    );
+    if (!userHrLimit.allowed) {
+      return NextResponse.json(
+        { error: "Hourly AI Copilot quota reached — please try again shortly." },
+        {
+          status: 429,
+          headers: {
+            ...NO_STORE_HEADERS,
+            "Retry-After": String(userHrLimit.retryAfterSec),
+            "X-RateLimit-Remaining": "0",
+          },
+        }
+      );
+    }
+
+    const declaredLen = Number(req.headers.get("content-length") || "0");
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_BODY_BYTES) {
+      return NextResponse.json(
+        { error: "Request payload too large" },
+        { status: 413, headers: NO_STORE_HEADERS }
+      );
+    }
+
+    const rawBody = await req.text();
+    if (rawBody.length > MAX_BODY_BYTES) {
+      return NextResponse.json(
+        { error: "Request payload too large" },
+        { status: 413, headers: NO_STORE_HEADERS }
+      );
+    }
+
+    let parsedBody: Record<string, unknown>;
+    try {
+      const json = JSON.parse(rawBody);
+      if (!json || typeof json !== "object" || Array.isArray(json)) {
+        return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400, headers: NO_STORE_HEADERS });
+      }
+      parsedBody = json as Record<string, unknown>;
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400, headers: NO_STORE_HEADERS });
+    }
+
+    const rawMessage = typeof parsedBody.message === "string" ? parsedBody.message.trim() : "";
+    if (!rawMessage) {
+      return NextResponse.json({ error: "Message is required" }, { status: 400, headers: NO_STORE_HEADERS });
+    }
+    if (rawMessage.length > MAX_MESSAGE_CHARS) {
+      return NextResponse.json(
+        { error: `Message must be ${MAX_MESSAGE_CHARS} characters or fewer` },
+        { status: 400, headers: NO_STORE_HEADERS }
+      );
+    }
+    const message = rawMessage;
+
+    const rawDoc =
+      parsedBody.doctorContext && typeof parsedBody.doctorContext === "object" && !Array.isArray(parsedBody.doctorContext)
+        ? (parsedBody.doctorContext as Record<string, unknown>)
+        : undefined;
+    const doctorContext = rawDoc
+      ? {
+          name: cleanShortText(rawDoc.name),
+          specialty: cleanShortText(rawDoc.specialty),
+          clinic: cleanShortText(rawDoc.clinic),
+          area: cleanShortText(rawDoc.area),
+          priority: cleanShortText(rawDoc.priority, 40),
+          focusProducts: Array.isArray(rawDoc.focusProducts)
+            ? rawDoc.focusProducts
+                .map((p) => cleanShortText(p))
+                .filter(Boolean)
+                .slice(0, 10)
+            : [],
+        }
+      : undefined;
+
+    const selectedProduct = cleanShortText(parsedBody.selectedProduct) || undefined;
+    const mode: "highlights" | "full" | "voice" =
+      typeof parsedBody.mode === "string" && ALLOWED_MODES.has(parsedBody.mode)
+        ? (parsedBody.mode as "highlights" | "full" | "voice")
+        : "highlights";
+    const preferredLang =
+      typeof parsedBody.preferredLang === "string" && ALLOWED_LANGS.has(parsedBody.preferredLang)
+        ? parsedBody.preferredLang
+        : "auto";
+
+    const responseHeaders = {
+      ...NO_STORE_HEADERS,
+      "X-RateLimit-Remaining": String(Math.min(userMinLimit.remaining, userHrLimit.remaining)),
+    };
 
     const apiKey = (process.env.GEMINI_API_KEY || "").trim();
 
@@ -270,13 +559,17 @@ export async function POST(req: NextRequest) {
     if (apiKey) {
       const fullPrompt = `${SYSTEM_PROMPT}\n${contextSnippet}\n${langInstruction}\n${modeInstruction}\n${formattingRule}\n[USER QUERY / REQUEST]:\n${message}`;
 
-      // Try candidate models in order for resilience
+      // Try candidate models in order for resilience; pass API key via header (never in URL)
       for (const model of GEMINI_MODELS) {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
         try {
           const response = await fetch(url, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": apiKey,
+            },
+            signal: AbortSignal.timeout(12_000),
             body: JSON.stringify({
               contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
               generationConfig: {
@@ -291,11 +584,14 @@ export async function POST(req: NextRequest) {
             const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
             if (text) {
               const detectedLang = detectLangCode(message, text, preferredLang);
-              return NextResponse.json({ reply: text, source: "gemini", model, lang: detectedLang });
+              return NextResponse.json(
+                { reply: text, source: "gemini", model, lang: detectedLang },
+                { headers: responseHeaders }
+              );
             }
           }
         } catch {
-          // Continue to next model on network/model error
+          // Continue to next model on network/timeout/model error
         }
       }
     }
@@ -303,11 +599,14 @@ export async function POST(req: NextRequest) {
     // Fallback response engine in case of offline or upstream network issue
     const detectedLang = detectLangCode(message, "", preferredLang);
     const reply = generateSmartFallbackReply(message, doctorContext, selectedProduct, mode, detectedLang);
-    return NextResponse.json({ reply, source: "built-in", lang: detectedLang });
-  } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Internal AI Error" },
-      { status: 500 }
+      { reply, source: "built-in", lang: detectedLang },
+      { headers: responseHeaders }
+    );
+  } catch {
+    return NextResponse.json(
+      { error: "AI service temporarily unavailable" },
+      { status: 500, headers: NO_STORE_HEADERS }
     );
   }
 }

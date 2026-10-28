@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlarmClock,
@@ -50,9 +51,24 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { QRCodeSVG } from "qrcode.react";
-import { DoctorImportDialog, type ParsedDoctor } from "./doctor-import";
-import { AiCopilot } from "./ai-copilot";
+import type { ParsedDoctor } from "./doctor-import";
+import { DashboardSkeleton } from "./bdm-app-loader";
+
+const QRCodeSVG = dynamic(() => import("qrcode.react").then((m) => m.QRCodeSVG), { ssr: false });
+const DoctorImportDialog = dynamic(
+  () => import("./doctor-import").then((m) => m.DoctorImportDialog),
+  { ssr: false }
+);
+const AiCopilot = dynamic(() => import("./ai-copilot").then((m) => m.AiCopilot), {
+  ssr: false,
+  loading: () => (
+    <div className="mx-auto w-full max-w-4xl space-y-4">
+      <div className="h-24 animate-pulse rounded-3xl bg-emerald-950/90" />
+      <div className="h-44 animate-pulse rounded-3xl border border-slate-200 bg-slate-50" />
+      <div className="h-72 animate-pulse rounded-3xl border border-slate-200 bg-slate-50" />
+    </div>
+  ),
+});
 import {
   SETUP_SQL,
   SESSION_EXPIRED,
@@ -318,21 +334,35 @@ const DEFAULT_RATES: Record<string, number> = {
 };
 const orderTotal = (items: OrderItem[]) => items.reduce((s, i) => s + (Number(i.qty) || 0) * (Number(i.rate) || 0), 0);
 const orderQty = (items: OrderItem[]) => items.reduce((s, i) => s + (Number(i.qty) || 0), 0);
-const normPay = (p: Partial<Payment>): Payment => ({
-  id: String(p.id || Math.random().toString(36).slice(2, 10)),
-  invoiceNo: String(p.invoiceNo || ""),
-  orderDate: String(p.orderDate || ""),
-  items: Array.isArray(p.items) ? p.items.map((i) => ({ product: String(i.product || ""), qty: Number(i.qty) || 0, rate: Number(i.rate) || 0 })) : [],
-  doctorName: String(p.doctorName || ""),
-  doctorArea: String(p.doctorArea || ""),
-  billingName: String(p.billingName || ""),
-  purpose: String(p.purpose || ""),
-  amount: Number(p.amount) || 0,
-  dueDate: String(p.dueDate || ""),
-  paidDate: String(p.paidDate || ""),
-  status: (p.status as PaymentStatus) || "pending",
-  mode: String(p.mode || "UPI"),
-});
+const normPay = (p: Partial<Payment> | null | undefined): Payment => {
+  const r = p && typeof p === "object" && !Array.isArray(p) ? p : {};
+  const rawStatus = String(r.status || "");
+  const status: PaymentStatus =
+    rawStatus === "paid" || rawStatus === "overdue" ? rawStatus : "pending";
+  return {
+    id: String(r.id || Math.random().toString(36).slice(2, 10)),
+    invoiceNo: String(r.invoiceNo || ""),
+    orderDate: String(r.orderDate || ""),
+    items: Array.isArray(r.items)
+      ? r.items
+          .filter((i): i is OrderItem => Boolean(i && typeof i === "object"))
+          .map((i) => ({
+            product: String(i.product || ""),
+            qty: Number(i.qty) || 0,
+            rate: Number(i.rate) || 0,
+          }))
+      : [],
+    doctorName: String(r.doctorName || ""),
+    doctorArea: String(r.doctorArea || ""),
+    billingName: String(r.billingName || ""),
+    purpose: String(r.purpose || ""),
+    amount: Number(r.amount) || 0,
+    dueDate: String(r.dueDate || ""),
+    paidDate: String(r.paidDate || ""),
+    status,
+    mode: String(r.mode ?? "UPI"),
+  };
+};
 
 /* migrate old short names -> new full names from sheet */
 const PRODUCT_MIGRATION: Record<string, string> = {
@@ -537,9 +567,17 @@ interface SyncCtx {
   ownerKey: string;
   onlineOwner: boolean;
   canSave: boolean;
-  push: (key: string, value: unknown) => void;
+  dirtyKeys: Map<string, unknown>;
+  push: (key: string, value: unknown, onSaved: () => void) => void;
 }
 const STORE_KEYS = ["nutrova-bio-v1", "nutrova-doctors-v3", "nutrova-patches-v2", "nutrova-reminders-v1", "nutrova-payments-v3"];
+const LEGACY_STORE_KEYS = [
+  "nutrova-doctors-v2",
+  "nutrova-doctors-v1",
+  "nutrova-patches-v1",
+  "nutrova-payments-v2",
+  "nutrova-payments-v1",
+];
 
 /* Dashboard area-patches summary: remember whether the owner expanded it. */
 const PATCH_SUMMARY_KEY = "nutrova-patch-summary-open-v1";
@@ -547,24 +585,29 @@ const PATCH_SUMMARY_PREVIEW = 3;
 
 /* Remove every cached dataset for every account on this device.
 
-   useSynced() stores its offline copy under `${key}::${ownerKey}`, but
-   sign-out only removed the UNSCOPED keys — so signing out left the previous
-   account's doctors, payments and reminders sitting in localStorage under
-   e.g. "nutrova-doctors-v3::cloud:divakar.reddy@nutrova.com". Nothing in the
-   app reads those for a different account, but they are still this account's
-   data readable on a shared phone. Clearing the unscoped key and every scoped
-   variant guarantees the next person starts from nothing. */
+   useSynced() stores its offline copy under `${key}::${ownerKey}`, and older
+   versions left v1/v2 keys behind. Clearing every current and legacy key
+   (both unscoped and scoped) guarantees the next person starts from nothing. */
 function clearDeviceCaches() {
   try {
+    const allBases = [...STORE_KEYS, ...LEGACY_STORE_KEYS];
     const doomed: string[] = [];
     for (let i = 0; i < localStorage.length; i += 1) {
       const k = localStorage.key(i);
       if (!k) continue;
-      if (STORE_KEYS.some((base) => k === base || k.startsWith(`${base}::`))) doomed.push(k);
+      if (allBases.some((base) => k === base || k.startsWith(`${base}::`))) doomed.push(k);
     }
     doomed.forEach((k) => localStorage.removeItem(k));
   } catch {
     /* ignore */
+  }
+}
+
+function safeJson(v: unknown): string {
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return "";
   }
 }
 
@@ -612,27 +655,45 @@ function useSynced<T>(
   const ref = useRef(sync);
   ref.current = sync;
   const ownerRef = useRef(sync.ownerKey);
+  const lastSyncedJsonRef = useRef<string>(safeJson(value));
+
   useLayoutEffect(() => {
     if (ownerRef.current === sync.ownerKey) return;
     ownerRef.current = sync.ownerKey;
     const fallback = emptyForNewAccount ? emptyForNewAccount() : seed();
-    setValue(sync.onlineOwner ? fallback : loadLocal(fallback));
+    const next = sync.onlineOwner ? fallback : loadLocal(fallback);
+    lastSyncedJsonRef.current = safeJson(next);
+    setValue(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [localKey, sync.ownerKey, sync.onlineOwner]);
+
   useLayoutEffect(() => {
     // Never hydrate from the previous user's map while a new account is loading.
     if (!sync.ownerKey || sync.remoteOwnerKey !== sync.ownerKey || !sync.remote) return;
+    // Never clobber an unsaved edit made while temporarily offline during a background poll.
+    if (sync.dirtyKeys.has(key)) return;
+    let next: T;
     if (Object.prototype.hasOwnProperty.call(sync.remote, key)) {
       const v = sync.remote[key] as T;
-      setValue(norm ? norm(v) : v);
+      next = norm ? norm(v) : v;
     } else {
       // An account with no row yet starts with its own profile/workspace, never
       // whatever account happened to use this browser before it.
-      setValue(emptyForNewAccount ? emptyForNewAccount() : seed());
+      next = emptyForNewAccount ? emptyForNewAccount() : seed();
     }
+    lastSyncedJsonRef.current = safeJson(next);
+    setValue(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sync.remote, sync.remoteOwnerKey, sync.ownerKey]);
+
   useEffect(() => {
+    const serialized = safeJson(value);
+    const isModified = serialized !== lastSyncedJsonRef.current;
+
+    if (ref.current.onlineOwner && ref.current.canSave && isModified) {
+      ref.current.dirtyKeys.set(key, value);
+    }
+
     const t = window.setTimeout(() => {
       if (ref.current.onlineOwner) {
         // Cloud-only: never cache data on the device, and clear anything an
@@ -645,15 +706,23 @@ function useSynced<T>(
         }
       } else {
         try {
-          localStorage.setItem(localKey, JSON.stringify(value));
+          localStorage.setItem(localKey, serialized);
         } catch {
           /* ignore */
         }
       }
-      if (ref.current.canSave) ref.current.push(key, value);
+      if (ref.current.canSave && serialized !== lastSyncedJsonRef.current) {
+        ref.current.push(key, value, () => {
+          lastSyncedJsonRef.current = serialized;
+          if (safeJson(ref.current.dirtyKeys.get(key)) === serialized) {
+            ref.current.dirtyKeys.delete(key);
+          }
+        });
+      }
     }, 250);
     return () => window.clearTimeout(t);
   }, [key, localKey, value, sync.canSave, sync.onlineOwner]);
+
   return [value, setValue] as const;
 }
 
@@ -768,11 +837,22 @@ const firstName = (name: string) => {
    rev 2 — creator's own account (name contains "Divakar"): old default name / HQ → M Divakar Reddy · Bangalore 2 HQ
    rev 3 — every profile: role title renamed to "Business Development Manager" */
 const BIO_REV = 3;
-const normBio = (b: Bio): Bio => {
-  if (!b || typeof b !== "object") return seedBio();
-  const rev = b.rev || 0;
-  if (rev >= BIO_REV) return b;
-  const out: Bio = { ...b, rev: BIO_REV };
+const normBio = (b: unknown): Bio => {
+  if (!b || typeof b !== "object" || Array.isArray(b)) return seedBio();
+  const raw = b as Partial<Bio>;
+  const base: Bio = {
+    name: typeof raw.name === "string" ? raw.name : "",
+    role: typeof raw.role === "string" && raw.role.trim() ? raw.role : APP_OWNER.role,
+    city: typeof raw.city === "string" ? raw.city : "",
+    state: typeof raw.state === "string" ? raw.state : "",
+    hq: typeof raw.hq === "string" ? raw.hq : "",
+    phone: typeof raw.phone === "string" ? raw.phone : "",
+    email: typeof raw.email === "string" ? raw.email : "",
+    rev: typeof raw.rev === "number" ? raw.rev : 0,
+  };
+  const rev = base.rev || 0;
+  if (rev >= BIO_REV) return base;
+  const out: Bio = { ...base, rev: BIO_REV };
   out.role = renameRole(out.role) || APP_OWNER.role;
   if (rev < 2 && /divakar/i.test(out.name || "")) {
     if (/^\s*divakar\s+reddy\s*$/i.test(out.name)) out.name = APP_OWNER.name;
@@ -787,12 +867,56 @@ const OLD_SAMPLE_NOTES: Record<string, string> = {
   "Call previous evening to block MR slot": "Call previous evening to block the BDM slot",
   "PA allots Friday 10–12 MR window": "PA allots Friday 10–12 BDM window",
 };
-const normDoctors = (arr: Doctor[]): Doctor[] =>
+const normDoctors = (arr: unknown): Doctor[] =>
   Array.isArray(arr)
-    ? arr.map((d) => {
-        const fixed = d ? OLD_SAMPLE_NOTES[d.appointmentNote] : undefined;
-        return fixed ? { ...d, appointmentNote: fixed } : d;
-      })
+    ? arr
+        .filter((d): d is Record<string, unknown> => Boolean(d && typeof d === "object" && !Array.isArray(d)))
+        .map((d) => {
+          const normalized = normalizeDoctor(d);
+          const fixed = OLD_SAMPLE_NOTES[normalized.appointmentNote];
+          return fixed ? { ...normalized, appointmentNote: fixed } : normalized;
+        })
+    : [];
+
+const normPatches = (arr: unknown): Patch[] =>
+  Array.isArray(arr)
+    ? arr
+        .filter((p): p is Record<string, unknown> => Boolean(p && typeof p === "object" && !Array.isArray(p)))
+        .map((p) => ({
+          id: String(p.id || uid()),
+          name: String(p.name || "").trim(),
+          color: "emerald",
+        }))
+        .filter((p) => Boolean(p.name))
+    : [];
+
+const VALID_REMINDER_KINDS = new Set<ReminderKind>(["Visit", "Call", "Follow-up", "Payment", "Sample Drop"]);
+const normReminders = (arr: unknown): Reminder[] =>
+  Array.isArray(arr)
+    ? arr
+        .filter((r): r is Record<string, unknown> => Boolean(r && typeof r === "object" && !Array.isArray(r)))
+        .map((r) => {
+          const rawKind = String(r.kind || "Visit") as ReminderKind;
+          return {
+            id: String(r.id || uid()),
+            doctorName: String(r.doctorName || ""),
+            doctorArea: String(r.doctorArea || ""),
+            title: String(r.title || ""),
+            date: String(r.date || todayISO()),
+            time: String(r.time || "10:00"),
+            kind: VALID_REMINDER_KINDS.has(rawKind) ? rawKind : "Visit",
+            notes: String(r.notes || ""),
+            done: Boolean(r.done),
+            alarm: r.alarm === false ? false : true,
+          };
+        })
+    : [];
+
+const normPayments = (arr: unknown): Payment[] =>
+  Array.isArray(arr)
+    ? arr
+        .filter((p): p is Partial<Payment> => Boolean(p && typeof p === "object" && !Array.isArray(p)))
+        .map((p) => normPay(p))
     : [];
 
 /* Patches are area names only */
@@ -845,6 +969,9 @@ const freshDoctors = (): Doctor[] => [
 
 function normalizeDoctor(raw: Record<string, unknown>): Doctor {
   const r = raw as Partial<Doctor> & { category?: string };
+  const rawPriority = String(r.priority || "");
+  const priority: Doctor["priority"] =
+    rawPriority === "High" || rawPriority === "Low" ? rawPriority : "Medium";
   return {
     id: String(r.id || uid()),
     name: String(r.name || ""),
@@ -860,18 +987,20 @@ function normalizeDoctor(raw: Record<string, unknown>): Doctor {
     lastVisit: String(r.lastVisit || ""),
     nextVisit: String(r.nextVisit || ""),
     notes: String(r.notes || ""),
-    priority: (r.priority as Doctor["priority"]) || "Medium",
-    callDays: Array.isArray(r.callDays) ? r.callDays : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
-    monthlyCalls: Array.isArray(r.monthlyCalls) ? r.monthlyCalls : [],
+    priority,
+    callDays: Array.isArray(r.callDays) ? r.callDays.map((d) => String(d)) : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    monthlyCalls: Array.isArray(r.monthlyCalls) ? r.monthlyCalls.map((m) => String(m)) : [],
     callTimeFrom: String(r.callTimeFrom || "10:00"),
     callTimeTo: String(r.callTimeTo || "13:00"),
     focusProducts: migrateProducts(r.focusProducts),
     followProducts: migrateProducts(r.followProducts),
-    appointmentModes: Array.isArray(r.appointmentModes) ? (r.appointmentModes as string[]) : [],
+    appointmentModes: Array.isArray(r.appointmentModes) ? r.appointmentModes.map((m) => String(m)) : [],
     appointmentContact: String(r.appointmentContact || ""),
     appointmentPhone: String(r.appointmentPhone || ""),
     appointmentLead: String(r.appointmentLead || "Same day"),
     appointmentNote: String(r.appointmentNote || ""),
+    updatedAt: typeof r.updatedAt === "string" && r.updatedAt ? r.updatedAt : undefined,
+    createdAt: typeof r.createdAt === "string" && r.createdAt ? r.createdAt : undefined,
   };
 }
 
@@ -1347,11 +1476,35 @@ export default function App() {
   const [session, setSession] = useState<BackendSession | null>(() => loadSession());
   const [remote, setRemote] = useState<Record<string, unknown> | null>(null);
   const [remoteOwnerKey, setRemoteOwnerKey] = useState("");
-  const [syncState, setSyncState] = useState<"idle" | "loading" | "synced" | "error">("idle");
+  const [syncState, setSyncState] = useState<"idle" | "loading" | "synced" | "error">(() =>
+    cfg && session ? "loading" : "idle"
+  );
   const [syncError, setSyncError] = useState("");
   const [retryTick, setRetryTick] = useState(0);
   const [authBusy, setAuthBusy] = useState(false);
   const [authInfo, setAuthInfo] = useState("");
+  const [initialPaintDone, setInitialPaintDone] = useState(false);
+  const dirtyKeysRef = useRef<Map<string, unknown>>(new Map());
+  const toastTimerRef = useRef<number | null>(null);
+  const sqlCopyTimerRef = useRef<number | null>(null);
+  const shareCopyTimerRef = useRef<number | null>(null);
+  const searchBlurTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    try {
+      (window as unknown as { __NUTROVA_MOUNTED__?: boolean }).__NUTROVA_MOUNTED__ = true;
+    } catch {
+      /* ignore */
+    }
+    const raf = window.requestAnimationFrame(() => setInitialPaintDone(true));
+    return () => {
+      window.cancelAnimationFrame(raf);
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+      if (sqlCopyTimerRef.current) window.clearTimeout(sqlCopyTimerRef.current);
+      if (shareCopyTimerRef.current) window.clearTimeout(shareCopyTimerRef.current);
+      if (searchBlurTimerRef.current) window.clearTimeout(searchBlurTimerRef.current);
+    };
+  }, []);
   /* Settings page */
   const [lastSync, setLastSync] = useState<number | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
@@ -1465,16 +1618,20 @@ export default function App() {
       ownerKey: dataOwnerKey,
       onlineOwner: online && !!session,
       canSave: online && !!session && remoteOwnerKey === dataOwnerKey && remote !== null,
-      push: (key, value) => {
+      dirtyKeys: dirtyKeysRef.current,
+      push: (key, value, onSaved) => {
         if (!cfg) return;
         saveKey(cfg, key, value)
           .then(() => {
+            onSaved();
             setSyncState("synced");
+            setSyncError("");
             setLastSync(Date.now());
           })
           .catch((e) => {
             const msg = e instanceof Error ? e.message : "Could not save to online store";
             if (msg === SESSION_EXPIRED) {
+              dirtyKeysRef.current.clear();
               clearSession();
               setSession(null);
               setSyncState("idle");
@@ -1496,15 +1653,13 @@ export default function App() {
     "nutrova-doctors-v3", seedDoctors, syncCtx, normDoctors, () => []
   );
   const [patches, setPatches] = useSynced<Patch[]>(
-    "nutrova-patches-v2", seedPatches, syncCtx, undefined, () => []
+    "nutrova-patches-v2", seedPatches, syncCtx, normPatches, () => []
   );
   const [reminders, setReminders] = useSynced<Reminder[]>(
-    "nutrova-reminders-v1", seedReminders, syncCtx, undefined, () => []
+    "nutrova-reminders-v1", seedReminders, syncCtx, normReminders, () => []
   );
   const [payments, setPayments] = useSynced<Payment[]>(
-    "nutrova-payments-v3", seedPayments, syncCtx,
-    (arr) => (Array.isArray(arr) ? arr.map(normPay) : []),
-    () => []
+    "nutrova-payments-v3", seedPayments, syncCtx, normPayments, () => []
   );
 
   // Consume the sign-up profile after that account's own cloud workspace loads.
@@ -1516,41 +1671,60 @@ export default function App() {
   }, [remote, remoteOwnerKey, dataOwnerKey, currentEmail]);
 
   const [bioDraft, setBioDraft] = useState<Bio>(bio);
-  useEffect(() => setBioDraft(bio), [currentEmail, bio]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* persist local-mode users (only used while no online store is connected) */
+  const bioOwnerRef = useRef(dataOwnerKey);
   useEffect(() => {
-    try { localStorage.setItem(AUTH_USERS_KEY, JSON.stringify(users)); } catch { /* ignore */ }
-  }, [users]);
+    if (bioOwnerRef.current !== dataOwnerKey) {
+      bioOwnerRef.current = dataOwnerKey;
+      setBioDraft(bio);
+      return;
+    }
+    // Don't overwrite in-progress typing in the Bio tab during a background sync poll.
+    setBioDraft((prev) => (activeTab === "bio" && safeJson(prev) !== safeJson(bio) ? prev : bio));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataOwnerKey, bio]);
 
-  /* one-time reconcile: link doctors to area patches + migrate products + appointment defaults */
+  /* Persist local-mode users ONLY while no online store is connected; purge
+     legacy plaintext Option B keys when online so old passwords never linger. */
   useEffect(() => {
+    if (online) {
+      try {
+        localStorage.removeItem(AUTH_USERS_KEY);
+        localStorage.removeItem(AUTH_SESSION_KEY);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    try {
+      localStorage.setItem(AUTH_USERS_KEY, JSON.stringify(users));
+    } catch {
+      /* ignore */
+    }
+  }, [users, online]);
+
+  /* Local-only reconcile: link doctors to area patches on offline-mode boot */
+  useEffect(() => {
+    if (online) return;
     setDoctors((prev) => {
       let changed = false;
       const next = prev.map((d) => {
-        let rec: Doctor = { ...d } as Doctor;
         if (!(d.patchId && patches.some((p) => p.id === d.patchId))) {
           const match = patches.find((p) => p.name.toLowerCase() === (d.area || "").trim().toLowerCase());
-          if (match && d.patchId !== match.id) { rec = { ...rec, patchId: match.id }; changed = true; }
-          else if (!match && d.patchId) { rec = { ...rec, patchId: "" }; changed = true; }
+          if (match && d.patchId !== match.id) {
+            changed = true;
+            return { ...d, patchId: match.id };
+          }
+          if (!match && d.patchId) {
+            changed = true;
+            return { ...d, patchId: "" };
+          }
         }
-        const f = migrateProducts(rec.focusProducts);
-        const fl = migrateProducts(rec.followProducts);
-        if (JSON.stringify(f) !== JSON.stringify(rec.focusProducts || []) || JSON.stringify(fl) !== JSON.stringify(rec.followProducts || [])) {
-          rec = { ...rec, focusProducts: f, followProducts: fl };
-          changed = true;
-        }
-        if (!Array.isArray((rec as Partial<Doctor>).appointmentModes)) { rec = { ...rec, appointmentModes: [] }; changed = true; }
-        if (typeof (rec as Partial<Doctor>).appointmentContact !== "string") { rec = { ...rec, appointmentContact: "" }; changed = true; }
-        if (typeof (rec as Partial<Doctor>).appointmentPhone !== "string") { rec = { ...rec, appointmentPhone: "" }; changed = true; }
-        if (typeof (rec as Partial<Doctor>).appointmentLead !== "string" || !(rec as Doctor).appointmentLead) { rec = { ...rec, appointmentLead: "Same day" }; changed = true; }
-        if (typeof (rec as Partial<Doctor>).appointmentNote !== "string") { rec = { ...rec, appointmentNote: "" }; changed = true; }
-        return rec;
+        return d;
       });
       return changed ? next : prev;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [online]);
 
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1668,22 +1842,38 @@ export default function App() {
   useEffect(() => {
     if (!cfg || !session) return;
     const requestOwner = `cloud:${(session.email || "").trim().toLowerCase()}`;
+    let cancelled = false;
     let busy = false;
     let last = Date.now();
     const pull = async (force: boolean) => {
-      if (busy || modalOpenRef.current) return;
+      if (cancelled || busy || modalOpenRef.current) return;
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      if (!force && Date.now() - last < 15000) return;
+      if (!force && Date.now() - last < 15000 && dirtyKeysRef.current.size === 0) return;
       busy = true;
       try {
+        // Flush any edits made while temporarily offline BEFORE pulling fresh cloud state,
+        // so reconnecting in the field never overwrites unsaved local work.
+        if (dirtyKeysRef.current.size > 0) {
+          const pendingEntries = Array.from(dirtyKeysRef.current.entries());
+          for (const [k, val] of pendingEntries) {
+            if (cancelled) return;
+            const snap = safeJson(val);
+            await saveKey(cfg, k, val);
+            if (safeJson(dirtyKeysRef.current.get(k)) === snap) {
+              dirtyKeysRef.current.delete(k);
+            }
+          }
+        }
         const map = await fetchAll(cfg);
+        if (cancelled) return;
         setRemote(map);
         setRemoteOwnerKey(requestOwner);
         setSyncState("synced");
+        setSyncError("");
         setLastSync(Date.now());
         last = Date.now();
       } catch {
-        /* offline or blocked — keep showing what we already have */
+        /* offline or blocked — keep showing what we already have, dirtyKeys stay queued */
       } finally {
         busy = false;
       }
@@ -1698,6 +1888,7 @@ export default function App() {
     window.addEventListener("online", onOnline);
     const iv = window.setInterval(() => void pull(false), 60000);
     return () => {
+      cancelled = true;
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("online", onOnline);
@@ -1780,7 +1971,11 @@ export default function App() {
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "info" } | null>(null);
   const showToast = (msg: string, kind: "ok" | "info" = "ok") => {
     setToast({ msg, kind });
-    window.setTimeout(() => setToast(null), 2600);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 2600);
   };
 
   /* ---------- Reminder alarms: in-app ringing + sound + phone notification ---------- */
@@ -1788,6 +1983,41 @@ export default function App() {
   const [alertsOn, setAlertsOn] = useState(false);
   const dismissedRef = useRef<Set<string>>(new Set());
   const snoozedRef = useRef<Map<string, number>>(new Map());
+
+  /* Account isolation: reset transient UI, filters, alarms, and owner roster whenever account changes */
+  const prevOwnerResetRef = useRef(dataOwnerKey);
+  useEffect(() => {
+    if (prevOwnerResetRef.current === dataOwnerKey) return;
+    prevOwnerResetRef.current = dataOwnerKey;
+    dirtyKeysRef.current.clear();
+    stopAlarmSound();
+    setRinging([]);
+    dismissedRef.current.clear();
+    snoozedRef.current.clear();
+    setActiveTab("dashboard");
+    setSettingsView("menu");
+    setMenuOpen(false);
+    setTeamRoster([]);
+    setTeamAccountsWarning("");
+    setTeamError("");
+    setTeamSearch("");
+    setSelectedUserId("");
+    setSelectedWorkspace(null);
+    setSelectedError("");
+    setExpandedIds(new Set());
+    setSelectMode(false);
+    setSelectedIds(new Set());
+    setSearch("");
+    setPatchFilter("all");
+    setSpecFilter("All");
+    setProductFilter("All");
+    setApptFilter("All");
+    setCallsTodayOnly(false);
+    setRemFilter("all");
+    setPayFilter("all");
+    setPaySearch("");
+    setPayPendingBucket("all");
+  }, [dataOwnerKey]);
   const [alarmSound, setAlarmSound] = useState<AlarmSoundId>(() => getAlarmSound());
   const [morningCfg, setMorningCfgState] = useState(() => loadMorningSettings());
   const [swReady, setSwReady] = useState(false);
@@ -1935,13 +2165,14 @@ export default function App() {
     setSelectedLoading(true);
     try {
       const ws = await fetchUserWorkspace(cfg, userId);
-      const arr = (k: string) => (Array.isArray(ws[k]) ? (ws[k] as unknown[]) : []);
       setSelectedWorkspace({
-        bio: (ws["nutrova-bio-v1"] as Bio) || ({} as Bio),
-        doctors: (ws["nutrova-doctors-v3"] as Doctor[]) || [],
-        patches: (ws["nutrova-patches-v2"] as Patch[]) || [],
-        reminders: arr("nutrova-reminders-v1") as Reminder[],
-        payments: arr("nutrova-payments-v3").map((p) => normPay(p as Partial<Payment>)),
+        bio: Object.prototype.hasOwnProperty.call(ws, "nutrova-bio-v1")
+          ? normBio(ws["nutrova-bio-v1"])
+          : seedBio(),
+        doctors: normDoctors(ws["nutrova-doctors-v3"]),
+        patches: normPatches(ws["nutrova-patches-v2"]),
+        reminders: normReminders(ws["nutrova-reminders-v1"]),
+        payments: normPayments(ws["nutrova-payments-v3"]),
       });
     } catch (e) {
       setSelectedError(e instanceof Error ? e.message : "Could not load this user's data");
@@ -2157,6 +2388,9 @@ export default function App() {
     if (!loginPassword) return setAuthError("Please enter password");
     setAuthBusy(true);
     try {
+      clearUrlAuthParams();
+      dirtyKeysRef.current.clear();
+      clearDeviceCaches();
       const s = await signInRemote(cfg, email, loginPassword);
       setSession(s);
       setLoginPassword("");
@@ -2281,11 +2515,18 @@ export default function App() {
     setAuthError("");
   };
   const doSignOut = () => {
+    stopAlarmSound();
+    dirtyKeysRef.current.clear();
+    clearUrlAuthParams();
     if (online) {
-      /* clear the cached copy so the next person on this phone never sees this account's data */
+      /* clear the cached copy + SDK session so the next person on this phone never sees this account's data */
       clearSession();
       clearDeviceCaches();
-      window.location.reload();
+      if (cfg) {
+        void signOutRemote(cfg).finally(() => window.location.reload());
+      } else {
+        window.location.reload();
+      }
       return;
     }
     persistSession("");
@@ -2321,6 +2562,7 @@ export default function App() {
         saveKey(cfg, "nutrova-reminders-v1", reminders),
         saveKey(cfg, "nutrova-payments-v3", payments),
       ]);
+      dirtyKeysRef.current.clear();
       setSyncState("synced");
       setSyncError("");
       setLastSync(Date.now());
@@ -2336,7 +2578,8 @@ export default function App() {
     try {
       await navigator.clipboard.writeText(SETUP_SQL);
       setSqlCopied(true);
-      setTimeout(() => setSqlCopied(false), 2000);
+      if (sqlCopyTimerRef.current) window.clearTimeout(sqlCopyTimerRef.current);
+      sqlCopyTimerRef.current = window.setTimeout(() => setSqlCopied(false), 2000);
     } catch {
       showToast("Copy failed — select the SQL text and copy it", "info");
     }
@@ -2381,7 +2624,8 @@ export default function App() {
         await navigator.clipboard.writeText(`${appShareText}\n${appShareUrl}`);
         setShareCopied(true);
         showToast("Link copied — paste in WhatsApp");
-        setTimeout(() => setShareCopied(false), 2000);
+        if (shareCopyTimerRef.current) window.clearTimeout(shareCopyTimerRef.current);
+        shareCopyTimerRef.current = window.setTimeout(() => setShareCopied(false), 2000);
       }
     } catch { /* user cancelled */ }
   };
@@ -2390,7 +2634,8 @@ export default function App() {
       await navigator.clipboard.writeText(appShareUrl);
       setShareCopied(true);
       showToast("App link copied");
-      setTimeout(() => setShareCopied(false), 2000);
+      if (shareCopyTimerRef.current) window.clearTimeout(shareCopyTimerRef.current);
+      shareCopyTimerRef.current = window.setTimeout(() => setShareCopied(false), 2000);
     } catch { setAuthError("Copy failed — long-press link to copy"); }
   };
 
@@ -3029,8 +3274,8 @@ export default function App() {
     if (inRecovery && urlSignal?.kind === "error") {
       const expired = /expired|invalid|used|otp/i.test(urlSignal.message || "");
       return (
-        <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
-          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+        <div className="flex min-h-screen min-h-dvh items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
+          <div className={`${initialPaintDone ? "anim-pop " : ""}w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl`}>
             <div className="bg-emerald-950 px-6 py-6 text-white sm:px-8">
               <div className="flex items-center gap-3">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-rose-500/20 ring-1 ring-rose-400/40">
@@ -3066,8 +3311,8 @@ export default function App() {
     }
     if (inRecovery) {
       return (
-        <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
-          <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+        <div className="flex min-h-screen min-h-dvh items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
+          <div className={`${initialPaintDone ? "anim-pop " : ""}w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl`}>
             <div className="bg-emerald-950 px-6 pb-6 pt-7 text-white sm:px-8 sm:pt-8">
               <div className="flex items-center gap-3">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/20 ring-1 ring-emerald-400/40">
@@ -3123,8 +3368,8 @@ export default function App() {
       );
     }
     return (
-      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
-        <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+      <div className="flex min-h-screen min-h-dvh items-center justify-center bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 p-4 sm:p-6">
+        <div className={`${initialPaintDone ? "anim-pop " : ""}w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl`}>
           <div className="bg-emerald-950 px-6 pb-6 pt-7 text-white sm:px-8 sm:pt-8">
             <div className="flex items-center gap-3">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/20 ring-1 ring-emerald-400/40">
@@ -3143,11 +3388,11 @@ export default function App() {
             </div>
 
             <div className="mt-5 grid grid-cols-2 gap-2 rounded-2xl bg-white/10 p-1.5 ring-1 ring-white/15">
-              <button onClick={() => { setAuthMode("login"); setAuthError(""); }} className={`rounded-xl py-2.5 text-sm font-extrabold transition ${authMode === "login" ? "bg-white text-emerald-900 shadow" : "text-emerald-100/70 hover:text-white"}`}>
+              <button onClick={() => { setAuthMode("login"); setAuthError(""); }} className={`rounded-xl px-2 py-2.5 text-xs font-extrabold transition sm:text-sm ${authMode === "login" ? "bg-white text-emerald-900 shadow" : "text-emerald-100/70 hover:text-white"}`}>
                 Sign in
               </button>
-              <button onClick={() => { setAuthMode("signup"); setAuthError(""); }} className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-sm font-extrabold transition ${authMode === "signup" ? "bg-white text-emerald-900 shadow" : "text-emerald-100/70 hover:text-white"}`}>
-                <UserPlus className="h-4 w-4" /> Create account
+              <button onClick={() => { setAuthMode("signup"); setAuthError(""); }} className={`flex items-center justify-center gap-1.5 rounded-xl px-2 py-2.5 text-xs font-extrabold transition sm:text-sm ${authMode === "signup" ? "bg-white text-emerald-900 shadow" : "text-emerald-100/70 hover:text-white"}`}>
+                <UserPlus className="h-4 w-4 shrink-0" /> Create account
               </button>
             </div>
           </div>
@@ -3275,7 +3520,7 @@ export default function App() {
                   No email yet? Check the spam folder, then tap Resend.
                 </p>
               )}
-              <button onClick={() => { setAuthMode("login"); setAuthError(""); setAuthInfo(""); }} className="w-full text-center text-xs font-bold text-emerald-700 underline-offset-2 hover:underline">
+              <button onClick={() => { clearUrlAuthParams(); setAuthMode("login"); setAuthError(""); setAuthInfo(""); }} className="w-full text-center text-xs font-bold text-emerald-700 underline-offset-2 hover:underline">
                 Back to sign in
               </button>
             </div>
@@ -3354,8 +3599,8 @@ export default function App() {
                 </p>
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-2 pt-1 sm:pt-0">
-              <span className="hidden items-center gap-2 text-xs font-semibold text-emerald-100/90 sm:flex bg-white/10 px-3 py-1.5 rounded-full ring-1 ring-white/15">
+            <div className="hidden shrink-0 items-center gap-2 sm:flex">
+              <span className="flex items-center gap-2 text-xs font-semibold text-emerald-100/90 bg-white/10 px-3 py-1.5 rounded-full ring-1 ring-white/15">
                 <Mail className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
                 <span className="max-w-[190px] truncate">{APP_OWNER.email}</span>
               </span>
@@ -3364,12 +3609,12 @@ export default function App() {
         </header>
 
         <nav className={`border-b border-slate-200 bg-white/95 backdrop-blur transition-shadow duration-200 ${frozenScrolled ? "shadow-sm" : ""}`}>
-          <div className="mx-auto flex max-w-7xl items-center gap-2 px-5 sm:px-8 py-3">
+          <div className="mx-auto flex max-w-7xl items-center gap-2 px-4 sm:px-8 py-3">
             {navItems.map((n) => (
               <button
                 key={n.id}
                 onClick={() => goTo(n.id)}
-                className={`flex shrink-0 items-center gap-1.5 rounded-full px-4 sm:px-5 py-2 text-sm font-bold transition ${
+                className={`flex shrink-0 items-center gap-1.5 rounded-full px-3.5 sm:px-5 py-2 text-sm font-bold transition ${
                   activeTab === n.id
                     ? "bg-emerald-700 text-white shadow-md shadow-emerald-200"
                     : "bg-slate-100 text-slate-600 hover:bg-emerald-50 hover:text-emerald-800"
@@ -3389,7 +3634,7 @@ export default function App() {
                 onClick={() => setMenuOpen(true)}
                 title="Open menu"
                 aria-label="Open menu"
-                className="flex shrink-0 items-center gap-1.5 rounded-full bg-slate-900 px-4 py-2 text-sm font-bold text-white transition hover:bg-slate-700"
+                className="flex shrink-0 items-center gap-1.5 rounded-full bg-slate-900 px-3.5 sm:px-4 py-2 text-sm font-bold text-white transition hover:bg-slate-700"
               >
                 <Menu className="h-4 w-4" />
                 <span className="hidden sm:inline">Menu</span>
@@ -3459,11 +3704,12 @@ export default function App() {
         </div>
       )}
 
-      <main className="mx-auto max-w-7xl px-5 py-8 sm:px-8 pb-32 sm:pb-40">
-        {/* online store status banner — only shown when something needs attention */}
-        {online && syncState === "loading" && (
+      <main className="mx-auto w-full max-w-7xl px-5 py-8 sm:px-8 pb-32 sm:pb-40">
+        {/* online store status banner — only shown when something needs attention
+            (initial load uses non-shifting inline skeletons so refresh never jumps) */}
+        {online && syncState === "loading" && remote !== null && (
           <p className="mb-5 flex items-center gap-2.5 rounded-2xl bg-slate-50 px-4 py-3 text-xs font-bold text-slate-600 ring-1 ring-slate-200">
-            <Cloud className="h-4 w-4 shrink-0 anim-pulse-soft" /> Loading your data from the online store…
+            <Cloud className="h-4 w-4 shrink-0 anim-pulse-soft" /> Syncing with the online store…
           </p>
         )}
         {online && syncState === "error" && (
@@ -3476,9 +3722,20 @@ export default function App() {
         )}
         {/* ------------------------------- dashboard ------------------------------ */}
         {activeTab === "dashboard" && (
-        <section id="dashboard" key="tab-dashboard" className="anim-fade-up">
-          <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Dashboard</h2>
+        <section id="dashboard" key="tab-dashboard" className={initialPaintDone ? "anim-fade-up" : ""}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Dashboard</h2>
+            {online && syncState === "loading" && remote === null && (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">
+                <Cloud className="h-3.5 w-3.5 text-emerald-600 anim-pulse-soft" /> Syncing…
+              </span>
+            )}
+          </div>
 
+          {online && syncState === "loading" && remote === null ? (
+            <DashboardSkeleton />
+          ) : (
+          <>
           {/* calls by schedule today */}
           <div className="mt-5 overflow-hidden rounded-3xl border border-emerald-200 bg-gradient-to-br from-emerald-50/70 via-white to-teal-50/50 shadow-sm">
             <div className="p-5 sm:p-6">
@@ -3493,7 +3750,7 @@ export default function App() {
                       : `Auto-matched from each doctor's weekly call days + monthly rules (${new Date().toLocaleDateString("en-IN", { weekday: "long" })}).`}
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded-full bg-emerald-700 px-4 py-1.5 text-sm font-extrabold text-white">{callsTodayList.length} doctors</span>
                   <button onClick={exportCallsToday} title="Download today's calls as CSV" className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-4 py-1.5 text-xs font-extrabold text-emerald-700 transition hover:bg-emerald-50">
                     <Download className="h-3.5 w-3.5" /> Download
@@ -3512,16 +3769,18 @@ export default function App() {
                     const ps = patchStyles(p?.color || "emerald");
                     const appts = d.appointmentModes || [];
                     return (
-                      <button key={d.id} onClick={() => { setSearch(d.name); setCallsTodayOnly(false); goTo("doctors"); }} className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left shadow-sm transition hover:border-emerald-300 hover:shadow">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-700 text-xs font-extrabold text-white">{initials(d.name)}</div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-extrabold text-slate-900">{d.name}</p>
-                          <p className="truncate text-xs font-semibold text-slate-500">{d.specialty} · {d.area}</p>
-                          {appts.length > 0 && <p className="mt-0.5 truncate text-[11px] font-bold text-sky-700">Appt: {appts.slice(0, 2).join(" · ")}{appts.length > 2 ? " +" + (appts.length - 2) : ""}</p>}
+                      <button key={d.id} onClick={() => { setSearch(d.name); setCallsTodayOnly(false); goTo("doctors"); }} className="flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left shadow-sm transition hover:border-emerald-300 hover:shadow sm:flex-row sm:items-center sm:gap-3">
+                        <div className="flex w-full min-w-0 items-center gap-3 sm:flex-1">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-700 text-xs font-extrabold text-white">{initials(d.name)}</div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-extrabold text-slate-900">{d.name}</p>
+                            <p className="truncate text-xs font-semibold text-slate-500">{d.specialty} · {d.area}</p>
+                            {appts.length > 0 && <p className="mt-0.5 truncate text-[11px] font-bold text-sky-700">Appt: {appts.slice(0, 2).join(" · ")}{appts.length > 2 ? " +" + (appts.length - 2) : ""}</p>}
+                          </div>
                         </div>
-                        <div className="shrink-0 text-right">
-                          <p className="flex items-center justify-end gap-1 text-xs font-extrabold text-emerald-700"><Clock className="h-3 w-3" />{describeTime(d)}</p>
-                          {p && <p className={`mt-1 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-extrabold ${ps.badge}`}><span className={`h-1.5 w-1.5 rounded-full ${ps.dot}`} />{p.name}</p>}
+                        <div className="flex w-full flex-wrap items-center justify-between gap-1.5 border-t border-slate-100 pt-2 sm:w-auto sm:shrink-0 sm:flex-col sm:items-end sm:border-t-0 sm:pt-0 sm:text-right">
+                          <p className="flex items-center gap-1 text-xs font-extrabold text-emerald-700"><Clock className="h-3 w-3 shrink-0" />{describeTime(d)}</p>
+                          {p && <p className={`inline-flex max-w-full items-center gap-1 truncate rounded-full border px-2 py-0.5 text-[10px] font-extrabold ${ps.badge}`}><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ps.dot}`} /><span className="truncate">{p.name}</span></p>}
                         </div>
                       </button>
                     );
@@ -3643,19 +3902,21 @@ export default function App() {
                 ) : (
                   <div className="mt-3 flex flex-wrap gap-2">
                     {todaysReminders.slice(0, 4).map((r) => (
-                      <button key={r.id} onClick={() => goTo("reminders")} className="flex items-center gap-2 rounded-full border border-emerald-200 bg-white px-3.5 py-1.5 text-xs font-bold text-emerald-800 shadow-sm transition hover:shadow">
-                        <Bell className="h-3.5 w-3.5 text-emerald-600" /> {r.time} · {r.doctorName.replace("Dr. ", "")}
+                      <button key={r.id} onClick={() => goTo("reminders")} className="flex max-w-full items-center gap-2 rounded-full border border-emerald-200 bg-white px-3.5 py-1.5 text-xs font-bold text-emerald-800 shadow-sm transition hover:shadow">
+                        <Bell className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                        <span className="truncate">{r.time} · {r.doctorName.replace("Dr. ", "")}</span>
                       </button>
                     ))}
                     {visitsToday.slice(0, 4).map((d) => (
-                      <button key={d.id} onClick={() => goTo("doctors")} className="flex items-center gap-2 rounded-full border border-amber-200 bg-white px-3.5 py-1.5 text-xs font-bold text-amber-800 shadow-sm transition hover:shadow">
-                        <MapPin className="h-3.5 w-3.5 text-amber-600" /> Visit · {d.name.replace("Dr. ", "")} — {d.area}
+                      <button key={d.id} onClick={() => goTo("doctors")} className="flex max-w-full items-center gap-2 rounded-full border border-amber-200 bg-white px-3.5 py-1.5 text-xs font-bold text-amber-800 shadow-sm transition hover:shadow">
+                        <MapPin className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                        <span className="truncate">Visit · {d.name.replace("Dr. ", "")} — {d.area}</span>
                       </button>
                     ))}
                   </div>
                 )}
               </div>
-              <div className="flex shrink-0 gap-2">
+              <div className="flex flex-wrap shrink-0 gap-2">
                 <button onClick={() => setReminderModal({ open: true, draft: emptyReminder(), editing: false })} className="flex items-center gap-1.5 rounded-full bg-emerald-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-md shadow-emerald-200 transition hover:bg-emerald-800">
                   <Plus className="h-4 w-4" /> Reminder
                 </button>
@@ -3665,6 +3926,8 @@ export default function App() {
               </div>
             </div>
           </div>
+          </>
+          )}
         </section>
         )}
 
@@ -3676,13 +3939,13 @@ export default function App() {
 
           <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-[360px_1fr]">
             {/* short bio ID card */}
-            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="min-w-0 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-800 px-6 pb-5 pt-6 text-white">
                 <div className="flex items-center gap-4">
                   <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-white/15 text-xl font-extrabold ring-1 ring-white/25">
                     {initials(bio.name || accountDisplayName || "User")}
                   </div>
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="truncate text-lg font-extrabold leading-tight">{bio.name || "—"}</p>
                     <p className="truncate text-sm text-emerald-100/80">{bio.role || "Business Development Manager"}</p>
                     <p className="mt-1 inline-flex items-center gap-1 rounded-full bg-white/15 px-2.5 py-0.5 text-[11px] font-extrabold text-emerald-100 ring-1 ring-white/20">
@@ -3692,10 +3955,10 @@ export default function App() {
                 </div>
               </div>
               <div className="space-y-2.5 p-5 text-sm">
-                <p className="flex items-center gap-2.5 font-medium text-slate-700"><MapPin className="h-4 w-4 shrink-0 text-emerald-600" /> {bio.city || "—"}, {bio.state || "—"} <span className="text-slate-300">·</span> HQ: {bio.hq || "—"}</p>
-                <p className="flex items-center gap-2.5 font-medium text-slate-700"><Phone className="h-4 w-4 shrink-0 text-emerald-600" /> {bio.phone || "Phone not set"}</p>
-                <p className="flex items-center gap-2.5 font-medium text-slate-700"><Mail className="h-4 w-4 shrink-0 text-emerald-600" /> <a href={`mailto:${bio.email}`} className="truncate underline decoration-slate-200 underline-offset-2 hover:text-emerald-700">{bio.email || "—"}</a></p>
-                <p className="flex items-center gap-2.5 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100"><Check className="h-4 w-4 shrink-0" /> Signed in as {currentEmail || bio.email} · stays until Sign out</p>
+                <p className="flex items-start gap-2.5 font-medium text-slate-700"><MapPin className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" /> <span className="min-w-0 break-words">{bio.city || "—"}, {bio.state || "—"} <span className="text-slate-300">·</span> HQ: {bio.hq || "—"}</span></p>
+                <p className="flex items-center gap-2.5 font-medium text-slate-700"><Phone className="h-4 w-4 shrink-0 text-emerald-600" /> <span className="min-w-0 truncate">{bio.phone || "Phone not set"}</span></p>
+                <p className="flex items-center gap-2.5 font-medium text-slate-700"><Mail className="h-4 w-4 shrink-0 text-emerald-600" /> <a href={`mailto:${bio.email}`} className="min-w-0 truncate underline decoration-slate-200 underline-offset-2 hover:text-emerald-700">{bio.email || "—"}</a></p>
+                <p className="flex items-start gap-2.5 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100"><Check className="mt-0.5 h-4 w-4 shrink-0" /> <span className="min-w-0 break-words">Signed in as {currentEmail || bio.email} · stays until Sign out</span></p>
                 {isOwner && (
                 <button onClick={() => goTo("settings")} className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-extrabold ring-1 transition ${online ? (syncState === "error" ? "bg-rose-50 text-rose-800 ring-rose-200" : "bg-sky-50 text-sky-800 ring-sky-100 hover:bg-sky-100") : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"}`}>
                   {online ? <Cloud className="h-4 w-4 shrink-0" /> : <CloudOff className="h-4 w-4 shrink-0" />}
@@ -3711,24 +3974,24 @@ export default function App() {
                   </button>
                 </div>
                 <div className="mt-1 grid grid-cols-3 gap-2 border-t border-slate-100 pt-3 text-center">
-                  <div className="rounded-2xl bg-emerald-50 px-2 py-2.5 ring-1 ring-emerald-100">
+                  <div className="min-w-0 rounded-2xl bg-emerald-50 px-1.5 sm:px-2 py-2.5 ring-1 ring-emerald-100">
                     <p className="text-lg font-extrabold text-emerald-800">{doctors.length}</p>
-                    <p className="text-[10px] font-extrabold uppercase tracking-widest text-emerald-600">Doctors</p>
+                    <p className="truncate text-[10px] font-extrabold uppercase tracking-wider sm:tracking-widest text-emerald-600">Doctors</p>
                   </div>
-                  <div className="rounded-2xl bg-slate-50 px-2 py-2.5 ring-1 ring-slate-200">
+                  <div className="min-w-0 rounded-2xl bg-slate-50 px-1.5 sm:px-2 py-2.5 ring-1 ring-slate-200">
                     <p className="text-lg font-extrabold text-slate-800">{patches.length}</p>
-                    <p className="text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Patches</p>
+                    <p className="truncate text-[10px] font-extrabold uppercase tracking-wider sm:tracking-widest text-slate-500">Patches</p>
                   </div>
-                  <div className="rounded-2xl bg-amber-50 px-2 py-2.5 ring-1 ring-amber-100">
+                  <div className="min-w-0 rounded-2xl bg-amber-50 px-1.5 sm:px-2 py-2.5 ring-1 ring-amber-100">
                     <p className="text-lg font-extrabold text-amber-800">{callsTodayList.length}</p>
-                    <p className="text-[10px] font-extrabold uppercase tracking-widest text-amber-600">Calls today</p>
+                    <p className="truncate text-[10px] font-extrabold uppercase tracking-wider sm:tracking-widest text-amber-600">Calls today</p>
                   </div>
                 </div>
               </div>
             </div>
 
             {/* edit form */}
-            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="min-w-0 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="border-l-4 border-emerald-500 p-5 sm:p-6">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-lg font-extrabold tracking-tight text-slate-900">Your Bio Data</h3>
@@ -3872,16 +4135,22 @@ export default function App() {
           </div>
 
           <div className="mt-4 flex flex-col gap-3 lg:flex-row">
-            <div className="relative flex-1">
+            <div className="relative min-w-0 flex-1">
               <div className="flex items-center gap-2.5 rounded-2xl border border-emerald-200 bg-white px-4 py-3 shadow-sm transition focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
                 <Search className="h-5 w-5 shrink-0 text-emerald-600" />
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  onFocus={() => setSearchFocused(true)}
-                  onBlur={() => setTimeout(() => setSearchFocused(false), 250)}
+                  onFocus={() => {
+                    if (searchBlurTimerRef.current) window.clearTimeout(searchBlurTimerRef.current);
+                    setSearchFocused(true);
+                  }}
+                  onBlur={() => {
+                    if (searchBlurTimerRef.current) window.clearTimeout(searchBlurTimerRef.current);
+                    searchBlurTimerRef.current = window.setTimeout(() => setSearchFocused(false), 250);
+                  }}
                   placeholder={isAndroidPhone ? "Search doctors…" : "Search doctor / area / specialty / product / appointment"}
-                  className="w-full bg-transparent text-[15px] font-medium text-slate-800 outline-none placeholder:text-slate-400"
+                  className="w-full min-w-0 bg-transparent text-[15px] font-medium text-slate-800 outline-none placeholder:text-slate-400"
                 />
                 {search && (
                   <button
@@ -3955,24 +4224,24 @@ export default function App() {
                       key={idx}
                       type="button"
                       onClick={() => setSearch(item.title)}
-                      className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 shadow-sm hover:bg-emerald-50 hover:border-emerald-300 transition"
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-emerald-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 shadow-sm hover:bg-emerald-50 hover:border-emerald-300 transition"
                     >
-                      <span className="text-[10px] text-emerald-700 font-extrabold uppercase">{item.type}:</span>
-                      <span>{item.title}</span>
+                      <span className="shrink-0 text-[10px] text-emerald-700 font-extrabold uppercase">{item.type}:</span>
+                      <span className="truncate">{item.title}</span>
                     </button>
                   ))}
                 </div>
               )}
             </div>
-            <div className="flex flex-col gap-3 sm:flex-row">
-              <select value={specFilter} onChange={(e) => setSpecFilter(e.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500">
+            <div className="flex min-w-0 flex-col gap-3 sm:flex-row">
+              <select value={specFilter} onChange={(e) => setSpecFilter(e.target.value)} className="w-full min-w-0 max-w-full truncate rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500 sm:w-auto sm:flex-1 lg:flex-none">
                 {specialtiesInUse.map((s) => <option key={s} value={s}>{s === "All" ? "All specialties" : s}</option>)}
               </select>
-              <select value={apptFilter} onChange={(e) => setApptFilter(e.target.value)} title="Filter by appointment mode" className="rounded-2xl border border-sky-200 bg-sky-50/50 px-4 py-3 text-sm font-bold text-sky-900 shadow-sm outline-none focus:border-sky-500">
+              <select value={apptFilter} onChange={(e) => setApptFilter(e.target.value)} title="Filter by appointment mode" className="w-full min-w-0 max-w-full truncate rounded-2xl border border-sky-200 bg-sky-50/50 px-4 py-3 text-sm font-bold text-sky-900 shadow-sm outline-none focus:border-sky-500 sm:w-auto sm:flex-1 lg:flex-none">
                 <option value="All">All appointment modes</option>
                 {APPOINTMENT_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
-              <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500 md:max-w-[280px]">
+              <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="w-full min-w-0 max-w-full truncate rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500 sm:w-auto sm:flex-1 md:max-w-[280px] lg:flex-none">
                 <option value="All">All Nutrova products (25)</option>
                 {PRODUCT_CATS.map((cat) => (
                   <optgroup key={cat} label={cat}>
@@ -4029,7 +4298,7 @@ export default function App() {
                   <article
                     key={d.id}
                     onClick={() => (selectMode ? toggleSelected(d.id) : toggleExpanded(d.id))}
-                    className={`group flex cursor-pointer flex-col rounded-3xl border bg-white p-5 shadow-sm transition hover:shadow-lg hover:shadow-emerald-100/50 ${picked ? "border-rose-400 ring-2 ring-rose-200" : "border-slate-200 hover:border-emerald-200"}`}
+                    className={`group flex min-w-0 cursor-pointer flex-col rounded-3xl border bg-white p-5 shadow-sm transition hover:shadow-lg hover:shadow-emerald-100/50 ${picked ? "border-rose-400 ring-2 ring-rose-200" : "border-slate-200 hover:border-emerald-200"}`}
                   >
                     <div className="flex items-start gap-3">
                       {selectMode ? (
@@ -4082,8 +4351,8 @@ export default function App() {
                     </div>
 
                     <div className="mt-3 space-y-1.5 text-[13px] font-medium text-slate-600">
-                      <p className="flex items-center gap-2 truncate"><Building2 className="h-3.5 w-3.5 shrink-0 text-slate-400" /> {d.clinic || "—"}</p>
-                      <p className="flex items-center gap-2 truncate"><MapPin className="h-3.5 w-3.5 shrink-0 text-slate-400" /> {d.area}{d.city ? `, ${d.city}` : ""} <span className="text-slate-300">·</span> {d.frequency}</p>
+                      <p className="flex min-w-0 items-center gap-2"><Building2 className="h-3.5 w-3.5 shrink-0 text-slate-400" /> <span className="min-w-0 truncate">{d.clinic || "—"}</span></p>
+                      <p className="flex min-w-0 items-center gap-2"><MapPin className="h-3.5 w-3.5 shrink-0 text-slate-400" /> <span className="min-w-0 truncate">{d.area}{d.city ? `, ${d.city}` : ""} <span className="text-slate-300">·</span> {d.frequency}</span></p>
                       <div className="flex items-center gap-2">
                         <Phone className="h-3.5 w-3.5 shrink-0 text-slate-400" />
                         {d.phone ? (
@@ -4123,24 +4392,24 @@ export default function App() {
                     <div onClick={(e) => e.stopPropagation()} className="cursor-default">
                     {/* call schedule block */}
                     <div className={`mt-3 rounded-2xl border p-3 ${givesToday ? "border-emerald-300 bg-emerald-50/60" : "border-slate-200 bg-slate-50/70"}`}>
-                      <div className="flex items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-widest text-slate-500">
-                          <CalendarClock className="h-3.5 w-3.5 text-emerald-600" /> Call days
+                          <CalendarClock className="h-3.5 w-3.5 shrink-0 text-emerald-600" /> Call days
                         </p>
                         {givesToday
                           ? <span className="rounded-full bg-emerald-600 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-white anim-pulse-soft">Gives call today</span>
                           : next && <span className="rounded-full bg-white px-2.5 py-0.5 text-[10px] font-extrabold text-slate-500 ring-1 ring-slate-200">Next: {next.label}</span>}
                       </div>
-                      <div className="mt-2 flex items-center gap-1">
+                      <div className="mt-2 flex flex-wrap items-center gap-1">
                         {WEEK_SHORT.map((day) => {
                           const on = (d.callDays || []).includes(day);
                           return (
-                            <span key={day} title={fullFromShort(day)} className={`flex h-7 w-7 items-center justify-center rounded-lg text-[10px] font-extrabold transition ${on ? "bg-emerald-700 text-white shadow-sm" : "bg-white text-slate-300 ring-1 ring-slate-200"}`}>
+                            <span key={day} title={fullFromShort(day)} className={`flex h-6 w-6 sm:h-7 sm:w-7 shrink-0 items-center justify-center rounded-lg text-[10px] font-extrabold transition ${on ? "bg-emerald-700 text-white shadow-sm" : "bg-white text-slate-300 ring-1 ring-slate-200"}`}>
                               {day[0]}
                             </span>
                           );
                         })}
-                        <span className="ml-1.5 truncate text-[11px] font-extrabold text-slate-600">{describeWeekly(d.callDays || [])}</span>
+                        <span className="ml-1 min-w-0 truncate text-[11px] font-extrabold text-slate-600">{describeWeekly(d.callDays || [])}</span>
                       </div>
                       {(d.monthlyCalls || []).length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -4344,9 +4613,9 @@ export default function App() {
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center rounded-full bg-slate-100 p-1">
+              <div className="flex max-w-full flex-wrap items-center gap-1 rounded-2xl bg-slate-100 p-1 sm:rounded-full">
                 {(["all", "today", "upcoming", "done"] as const).map((f) => (
-                  <button key={f} onClick={() => setRemFilter(f)} className={`rounded-full px-4 py-1.5 text-sm font-bold capitalize transition ${remFilter === f ? "bg-emerald-700 text-white shadow" : "text-slate-500 hover:text-emerald-800"}`}>
+                  <button key={f} onClick={() => setRemFilter(f)} className={`rounded-full px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-bold capitalize transition ${remFilter === f ? "bg-emerald-700 text-white shadow" : "text-slate-500 hover:text-emerald-800"}`}>
                     {f}
                   </button>
                 ))}
@@ -4373,7 +4642,7 @@ export default function App() {
               const od = daysOverdue(r.date);
               const area = r.doctorArea || doctorByName(r.doctorName)?.area || "";
               return (
-                <div key={r.id} className={`flex gap-3.5 rounded-3xl border p-4 shadow-sm transition ${r.done ? "border-slate-200 bg-slate-50/70" : critical ? "border-rose-300 bg-rose-50/60" : overdue ? "border-amber-200 bg-amber-50/40" : "border-slate-200 bg-white hover:border-emerald-200 hover:shadow-md"}`}>
+                <div key={r.id} className={`flex min-w-0 flex-col gap-3 rounded-3xl border p-4 shadow-sm transition sm:flex-row sm:gap-3.5 ${r.done ? "border-slate-200 bg-slate-50/70" : critical ? "border-rose-300 bg-rose-50/60" : overdue ? "border-amber-200 bg-amber-50/40" : "border-slate-200 bg-white hover:border-emerald-200 hover:shadow-md"}`}>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`rounded-full border px-2.5 py-0.5 text-[11px] font-extrabold ${KIND_COLORS[r.kind]}`}>{r.kind}</span>
@@ -4382,17 +4651,17 @@ export default function App() {
                       {overdue && !critical && <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-extrabold text-amber-800 ring-1 ring-amber-200">Overdue · {od}d</span>}
                       {r.done && <span className="rounded-full bg-slate-200 px-2.5 py-0.5 text-[11px] font-extrabold text-slate-600">Done</span>}
                       {r.alarm !== false && !r.done && <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-extrabold text-amber-800 ring-1 ring-amber-200"><AlarmClock className="h-3 w-3" />Alarm</span>}
-                      {area && <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-extrabold text-slate-600"><MapPin className="h-3 w-3" />{area}</span>}
+                      {area && <span className="flex max-w-full items-center gap-1 truncate rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-extrabold text-slate-600"><MapPin className="h-3 w-3 shrink-0" /><span className="truncate">{area}</span></span>}
                     </div>
-                    <p className={`mt-1.5 text-[15px] font-extrabold ${r.done ? "text-slate-400 line-through" : "text-slate-900"}`}>{r.title}</p>
+                    <p className={`mt-1.5 break-words text-[15px] font-extrabold ${r.done ? "text-slate-400 line-through" : "text-slate-900"}`}>{r.title}</p>
                     <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] font-semibold text-slate-500">
-                      <span className="flex items-center gap-1"><User className="h-3.5 w-3.5" /> {r.doctorName || "General"}</span>
-                      <span className="flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5" /> {fmtDate(r.date)}</span>
-                      <span className="flex items-center gap-1"><Clock className="h-3.5 w-3.5" /> {r.time}</span>
+                      <span className="flex min-w-0 items-center gap-1"><User className="h-3.5 w-3.5 shrink-0" /> <span className="truncate">{r.doctorName || "General"}</span></span>
+                      <span className="flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5 shrink-0" /> {fmtDate(r.date)}</span>
+                      <span className="flex items-center gap-1"><Clock className="h-3.5 w-3.5 shrink-0" /> {r.time}</span>
                     </p>
-                    {r.notes && <p className="mt-1.5 text-[13px] font-medium text-slate-500">{r.notes}</p>}
+                    {r.notes && <p className="mt-1.5 break-words text-[13px] font-medium text-slate-500">{r.notes}</p>}
                   </div>
-                  <div className="flex shrink-0 flex-col gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2.5 sm:shrink-0 sm:flex-col sm:items-stretch sm:border-t-0 sm:pt-0">
                     {!r.done && (
                       <div className="flex gap-1.5">
                         <button onClick={() => { dismissedRef.current.add(r.id); setReminders((p) => p.map((x) => (x.id === r.id ? { ...x, done: true } : x))); showToast("Reminder completed"); }} title="Mark completed" className="flex h-9 items-center gap-1 rounded-xl bg-emerald-700 px-3 text-xs font-extrabold text-white transition hover:bg-emerald-800">
@@ -4403,8 +4672,10 @@ export default function App() {
                         </button>
                       </div>
                     )}
-                    <IconBtn title="Edit" onClick={() => setReminderModal({ open: true, draft: { ...r }, editing: true })}><Pencil className="h-4 w-4" /></IconBtn>
-                    <IconBtn title="Delete" danger onClick={() => deleteReminder(r)}><Trash2 className="h-4 w-4" /></IconBtn>
+                    <div className="ml-auto flex gap-1.5 sm:ml-0 sm:flex-col">
+                      <IconBtn title="Edit" onClick={() => setReminderModal({ open: true, draft: { ...r }, editing: true })}><Pencil className="h-4 w-4" /></IconBtn>
+                      <IconBtn title="Delete" danger onClick={() => deleteReminder(r)}><Trash2 className="h-4 w-4" /></IconBtn>
+                    </div>
                   </div>
                 </div>
               );
@@ -4422,11 +4693,11 @@ export default function App() {
               <p className="mt-1 text-sm font-medium text-slate-500">{isAndroidPhone ? <>Purchase orders · <span className="font-bold text-slate-600">Red = 30+ days</span></> : <>Purchase orders of Nutrova products · <span className="font-bold text-slate-600">Red = pending 30+ days only</span> · below 30 days shows normal colour</>}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center rounded-full bg-slate-100 p-1">
+              <div className="flex max-w-full flex-wrap items-center gap-1 rounded-2xl bg-slate-100 p-1 sm:rounded-full">
                 {(["all", "pending", "overdue", "paid"] as const).map((f) => {
                   const c = f === "all" ? payments.length : f === "pending" ? payments.filter((x) => x.status !== "paid" && !isCriticalOverdue(x.dueDate)).length : f === "overdue" ? overduePayments.length : payments.filter((x) => x.status === "paid").length;
                   return (
-                    <button key={f} title={f === "overdue" ? "Overdue more than 30 days" : f} onClick={() => setPayFilter(f)} className={`rounded-full px-4 py-1.5 text-sm font-bold capitalize transition ${payFilter === f ? "bg-emerald-700 text-white shadow" : "text-slate-500 hover:text-emerald-800"}`}>
+                    <button key={f} title={f === "overdue" ? "Overdue more than 30 days" : f} onClick={() => setPayFilter(f)} className={`rounded-full px-2.5 sm:px-4 py-1.5 text-xs sm:text-sm font-bold capitalize transition ${payFilter === f ? "bg-emerald-700 text-white shadow" : "text-slate-500 hover:text-emerald-800"}`}>
                       {f} · {c}
                     </button>
                   );
@@ -4480,13 +4751,13 @@ export default function App() {
               </button>
               <span className="ml-auto hidden text-xs font-semibold text-slate-400 sm:block">{filteredPayments.length} shown · {inr(filteredPayments.filter((p) => p.status !== "paid").reduce((s, p) => s + p.amount, 0))} open in view</span>
             </div>
-            <div className="mt-3 flex flex-col gap-2 border-t border-slate-200/70 pt-3 sm:flex-row">
-              <div className="flex flex-1 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 shadow-sm focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+            <div className="mt-3 flex min-w-0 flex-col gap-2 border-t border-slate-200/70 pt-3 sm:flex-row">
+              <div className="flex min-w-0 flex-1 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 shadow-sm focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
                 <Search className="h-4 w-4 shrink-0 text-slate-400" />
-                <input value={paySearch} onChange={(e) => setPaySearch(e.target.value)} placeholder={isAndroidPhone ? "Search orders…" : "Search PO no / doctor / area / product / amount"} className="w-full bg-transparent text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
+                <input value={paySearch} onChange={(e) => setPaySearch(e.target.value)} placeholder={isAndroidPhone ? "Search orders…" : "Search PO no / doctor / area / product / amount"} className="w-full min-w-0 bg-transparent text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400" />
                 {paySearch && <button onClick={() => setPaySearch("")} className="rounded-full p-1 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
               </div>
-              <select value={paySort} onChange={(e) => setPaySort(e.target.value as typeof paySort)} title="Sort invoices" className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500">
+              <select value={paySort} onChange={(e) => setPaySort(e.target.value as typeof paySort)} title="Sort invoices" className="w-full min-w-0 max-w-full truncate rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm outline-none focus:border-emerald-500 sm:w-auto">
                 <option value="mostPending">Sort: Most pending days first</option>
                 <option value="dueDate">Sort: Due date (oldest first)</option>
                 <option value="amountHigh">Sort: Amount (high first)</option>
@@ -5811,9 +6082,9 @@ export default function App() {
                         </optgroup>
                       ))}
                     </select>
-                    <input type="number" min={1} value={it.qty || ""} onChange={(e) => updatePayItem(i, { qty: Number(e.target.value) })} placeholder="Qty" className={`${inputCls} col-span-4 sm:col-span-2`} />
-                    <input type="number" min={0} value={it.rate || ""} onChange={(e) => updatePayItem(i, { rate: Number(e.target.value) })} placeholder="Rate ₹" className={`${inputCls} col-span-5 sm:col-span-2`} />
-                    <p className="col-span-2 text-right text-xs font-extrabold text-slate-700 sm:col-span-1">{inr((Number(it.qty) || 0) * (Number(it.rate) || 0))}</p>
+                    <input type="number" min={1} value={it.qty || ""} onChange={(e) => updatePayItem(i, { qty: Number(e.target.value) })} placeholder="Qty" className={`${inputCls} col-span-3 sm:col-span-2`} />
+                    <input type="number" min={0} value={it.rate || ""} onChange={(e) => updatePayItem(i, { rate: Number(e.target.value) })} placeholder="Rate ₹" className={`${inputCls} col-span-4 sm:col-span-2`} />
+                    <p className="col-span-4 truncate text-right text-xs font-extrabold text-slate-700 sm:col-span-1">{inr((Number(it.qty) || 0) * (Number(it.rate) || 0))}</p>
                     <button type="button" onClick={() => removePayItem(i)} title="Remove product" className="col-span-1 flex h-9 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-4 w-4" /></button>
                   </div>
                 ))}
@@ -5868,23 +6139,23 @@ export default function App() {
       {ringing.length > 0 && (
         <div role="alertdialog" aria-label="Reminder alarm" className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/60 p-4 backdrop-blur-sm sm:items-center">
           <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl ring-1 ring-amber-300">
-            <div className="bg-gradient-to-r from-amber-400 to-orange-400 px-6 py-5 text-amber-950">
-              <div className="flex items-center gap-3">
-                <div className="anim-ring flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/90 shadow">
-                  <BellRing className="h-6 w-6 text-amber-600" />
+            <div className="bg-gradient-to-r from-amber-400 to-orange-400 px-4 py-4 text-amber-950 sm:px-6 sm:py-5">
+              <div className="flex items-center gap-2 sm:gap-3">
+                <div className="anim-ring flex h-10 w-10 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-2xl bg-white/90 shadow">
+                  <BellRing className="h-5 w-5 sm:h-6 sm:w-6 text-amber-600" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="text-lg font-extrabold leading-tight">Reminder alarm!</p>
-                  <p className="text-xs font-bold opacity-80">{ringing.length} task{ringing.length > 1 ? "s" : ""} due now · stays until you act</p>
+                  <p className="truncate text-base sm:text-lg font-extrabold leading-tight">Reminder alarm!</p>
+                  <p className="truncate text-xs font-bold opacity-80">{ringing.length} task{ringing.length > 1 ? "s" : ""} due now · stays until you act</p>
                 </div>
-                <button onClick={() => playAlarmSound(2, alarmSound, true)} title="Replay sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/90 text-amber-700 shadow transition hover:bg-white">
-                  <RefreshCcw className="h-5 w-5" />
+                <button onClick={() => playAlarmSound(2, alarmSound, true)} title="Replay sound" className="flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full bg-white/90 text-amber-700 shadow transition hover:bg-white">
+                  <RefreshCcw className="h-4 w-4 sm:h-5 sm:w-5" />
                 </button>
-                <button onClick={toggleMuted} title={muted ? "Unmute alarm sound" : "Mute alarm sound"} aria-label={muted ? "Unmute alarm sound" : "Mute alarm sound"} className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full shadow transition ${muted ? "bg-slate-900 text-white hover:bg-slate-700" : "bg-white/90 text-amber-700 hover:bg-white"}`}>
-                  {muted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
+                <button onClick={toggleMuted} title={muted ? "Unmute alarm sound" : "Mute alarm sound"} aria-label={muted ? "Unmute alarm sound" : "Mute alarm sound"} className={`flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full shadow transition ${muted ? "bg-slate-900 text-white hover:bg-slate-700" : "bg-white/90 text-amber-700 hover:bg-white"}`}>
+                  {muted ? <VolumeX className="h-4 w-4 sm:h-5 sm:w-5" /> : <Volume2 className="h-4 w-4 sm:h-5 sm:w-5" />}
                 </button>
-                <button onClick={skipAllRinging} title="Close + stop sound" aria-label="Close alarm and stop sound" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
-                  <X className="h-5 w-5" strokeWidth={3} />
+                <button onClick={skipAllRinging} title="Close + stop sound" aria-label="Close alarm and stop sound" className="flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full bg-amber-950/10 text-amber-950 transition hover:bg-amber-950/20">
+                  <X className="h-4 w-4 sm:h-5 sm:w-5" strokeWidth={3} />
                 </button>
               </div>
             </div>
@@ -6172,24 +6443,29 @@ function ProductSelector({ label, hint, icon, selected, onToggle, onClear, accen
 }
 
 function Modal({ title, children, onClose, wide }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCloseRef.current();
+    };
     window.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
       window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
+      document.body.style.overflow = prevOverflow;
     };
-  }, [onClose]);
+  }, []);
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/45 p-0 backdrop-blur-sm sm:items-center sm:p-6" onClick={onClose}>
       <div
-        className={`anim-pop max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-white p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl sm:max-h-[90vh] sm:rounded-3xl sm:p-7 sm:pb-7 ${wide ? "max-w-3xl" : "max-w-2xl"}`}
+        className={`anim-pop max-h-[92vh] w-full overflow-y-auto overflow-x-hidden rounded-t-3xl bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl sm:max-h-[90vh] sm:rounded-3xl sm:p-7 sm:pb-7 ${wide ? "max-w-3xl" : "max-w-2xl"}`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-5 flex items-center justify-between">
-          <h3 className="text-xl font-extrabold tracking-tight text-slate-900">{title}</h3>
-          <button onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200"><X className="h-4 w-4" /></button>
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <h3 className="min-w-0 truncate text-xl font-extrabold tracking-tight text-slate-900">{title}</h3>
+          <button onClick={onClose} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200"><X className="h-4 w-4" /></button>
         </div>
         {children}
       </div>
@@ -6201,11 +6477,18 @@ function Modal({ title, children, onClose, wide }: { title: string; children: Re
 function ShareAppDialog({ url, text, copied, online, onClose, onNative, onCopy }: {
   url: string; text: string; copied: boolean; online: boolean; onClose: () => void; onNative: () => void; onCopy: () => void;
 }) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopImmediatePropagation();
+        onCloseRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
   const waLink = `https://wa.me/?text=${encodeURIComponent(text + "\n" + url)}`;
   const mailLink = `mailto:?subject=${encodeURIComponent("Nutrova Doctor Tracker")}&body=${encodeURIComponent(text + "\n" + url)}`;
   return (
@@ -6213,21 +6496,21 @@ function ShareAppDialog({ url, text, copied, online, onClose, onNative, onCopy }
       <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="bg-emerald-950 px-6 py-5 text-white">
           <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20">
                 <Share2 className="h-5 w-5 text-emerald-300" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <p className="text-base font-extrabold leading-tight">Share this app</p>
                 <p className="text-xs text-emerald-200/70">{online ? "Online store is built in — teammates just create an account" : "Send to other Business Development Managers like an APK"}</p>
               </div>
             </div>
-            <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"><X className="h-4 w-4" /></button>
+            <button onClick={onClose} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"><X className="h-4 w-4" /></button>
           </div>
         </div>
         <div className="space-y-4 p-6">
           <div className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div className="rounded-xl bg-white p-2 ring-1 ring-slate-200">
+            <div className="shrink-0 rounded-xl bg-white p-2 ring-1 ring-slate-200">
               <QRCodeSVG value={url} size={84} level="M" />
             </div>
             <div className="min-w-0 flex-1">
@@ -6264,11 +6547,18 @@ function ShareAppDialog({ url, text, copied, online, onClose, onNative, onCopy }
 function ConfirmDialog({ title, label, detail, confirmText, onCancel, onYes }: {
   title: string; label: string; detail: string; confirmText: string; onCancel: () => void; onYes: () => void;
 }) {
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopImmediatePropagation();
+        onCancelRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onClick={onCancel}>
       <div className="anim-pop w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -6278,11 +6568,11 @@ function ConfirmDialog({ title, label, detail, confirmText, onCancel, onYes }: {
               <Trash2 className="h-6 w-6" />
             </div>
             <div className="min-w-0 flex-1">
-              <h3 className="text-lg font-extrabold tracking-tight text-slate-900">{title}</h3>
-              <p className="mt-1.5 text-sm font-medium leading-relaxed text-slate-600">
+              <h3 className="break-words text-lg font-extrabold tracking-tight text-slate-900">{title}</h3>
+              <p className="mt-1.5 break-words text-sm font-medium leading-relaxed text-slate-600">
                 This will permanently remove <span className="font-extrabold text-slate-900">{label}</span>.
               </p>
-              {detail && <p className="mt-1.5 rounded-xl bg-slate-50 px-3 py-2 text-xs font-semibold leading-relaxed text-slate-500">{detail}</p>}
+              {detail && <p className="mt-1.5 break-words rounded-xl bg-slate-50 px-3 py-2 text-xs font-semibold leading-relaxed text-slate-500">{detail}</p>}
             </div>
           </div>
           <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">

@@ -18,7 +18,8 @@
   font-style: normal;
   font-weight: 100 900;
   font-display: swap;
-  src: url("/fonts/inter-latin-variable.woff2") format("woff2-variations");
+  src: url("/fonts/inter-latin-variable.woff2") format("woff2"),
+    url("/fonts/inter-latin-variable.woff2") format("woff2-variations");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
     U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
     U+2212, U+2215, U+FEFF, U+FFFD;
@@ -28,7 +29,8 @@
   font-style: normal;
   font-weight: 200 800;
   font-display: swap;
-  src: url("/fonts/plus-jakarta-sans-latin-variable.woff2") format("woff2-variations");
+  src: url("/fonts/plus-jakarta-sans-latin-variable.woff2") format("woff2"),
+    url("/fonts/plus-jakarta-sans-latin-variable.woff2") format("woff2-variations");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
     U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
     U+2212, U+2215, U+FEFF, U+FFFD;
@@ -71,6 +73,24 @@
 }
 .app-shell > main {
   flex: 1 0 auto;
+  width: 100%;
+}
+
+/* Pre-paint boot shells: layout.tsx sets html[data-nutrova-boot="in"|"out"]
+   synchronously in <head> before first paint, so the server HTML paints the
+   white app shell when signed in and the emerald login shell when signed out —
+   zero hydration mismatch and zero dark-to-white blink on refresh. */
+.boot-signed-in {
+  display: none;
+}
+.boot-signed-out {
+  display: flex;
+}
+html[data-nutrova-boot="in"] .boot-signed-in {
+  display: flex;
+}
+html[data-nutrova-boot="in"] .boot-signed-out {
+  display: none;
 }
 
 html {
@@ -250,15 +270,7 @@ html.android-phone {
   letter-spacing: -0.015em !important;
 }
 
-/* Frozen header title + tagline use px sizes, so override explicitly */
-.android-phone header h1 {
-  font-size: 1rem !important;
-  line-height: 1.3rem !important;
-}
-.android-phone header p {
-  font-size: 0.72rem !important;
-  line-height: 1.05rem !important;
-}
+/* Top header app name intentionally keeps its explicit 24px / 31px scale on all devices. */
 
 /* Big numbers on summary cards */
 .android-phone .text-3xl {

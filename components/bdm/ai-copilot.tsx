@@ -25,6 +25,7 @@ import {
   PhoneCall,
   PhoneOff,
 } from "lucide-react";
+import { getValidAccessToken } from "./backend";
 
 interface Doctor {
   id: string;
@@ -293,7 +294,9 @@ export function AiCopilot({
   const chatBoxRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
-  const callTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const callTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const isVoiceCallActiveRef = useRef(false);
   isVoiceCallActiveRef.current = isVoiceCallActive;
 
@@ -308,22 +311,31 @@ export function AiCopilot({
         } catch {}
       }
       if (callTimerRef.current) clearInterval(callTimerRef.current);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      if (abortRef.current) abortRef.current.abort();
     };
   }, []);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        setIsVoiceSupported(true);
-      }
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.getVoices();
-        window.speechSynthesis.onvoiceschanged = () => {
+    if (typeof window === "undefined") return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      setIsVoiceSupported(true);
+    }
+    if ("speechSynthesis" in window) {
+      const primeVoices = () => {
+        try {
           window.speechSynthesis.getVoices();
-        };
-      }
+        } catch {
+          /* ignore */
+        }
+      };
+      primeVoices();
+      window.speechSynthesis.addEventListener?.("voiceschanged", primeVoices);
+      return () => {
+        window.speechSynthesis.removeEventListener?.("voiceschanged", primeVoices);
+      };
     }
   }, []);
 
@@ -429,6 +441,7 @@ export function AiCopilot({
       setLiveTranscript("");
 
       let finalCaptured = "";
+      let latestInterim = "";
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onresult = (event: any) => {
@@ -441,6 +454,7 @@ export function AiCopilot({
             interim += trans;
           }
         }
+        latestInterim = interim;
         setLiveTranscript(finalCaptured || interim);
       };
 
@@ -452,9 +466,9 @@ export function AiCopilot({
 
       recognition.onend = () => {
         if (!isVoiceCallActiveRef.current) return;
-        const textToProcess = (finalCaptured || liveTranscript).trim();
+        const textToProcess = (finalCaptured || latestInterim).trim();
         if (textToProcess.length > 2) {
-          handleVoiceCallTurn(textToProcess);
+          void handleVoiceCallTurn(textToProcess);
         } else {
           setCallStatus("connected");
         }
@@ -464,16 +478,26 @@ export function AiCopilot({
     } catch {
       setCallStatus("connected");
     }
-  }, [liveTranscript, onToast]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onToast, selectedDoctorId, selectedProduct]);
 
   const handleVoiceCallTurn = async (query: string) => {
     setCallStatus("thinking");
     setLiveTranscript(`You: "${query}"`);
 
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
+      const token = await getValidAccessToken();
       const res = await fetch("/api/ai", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        signal: controller.signal,
         body: JSON.stringify({
           message: query,
           doctorContext: selectedDoctor
@@ -491,7 +515,13 @@ export function AiCopilot({
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 429) {
+          onToast(data.error || "Please wait or sign in again.", "info");
+        }
+        throw new Error(data.error || "No response");
+      }
       if (data.reply) {
         const spokenReply = cleanPlainText(data.reply);
         const replyLang = data.lang || detectScriptLanguage(spokenReply);
@@ -545,6 +575,7 @@ export function AiCopilot({
 
   const endLiveVoiceCall = () => {
     stopSpeaking();
+    abortRef.current?.abort();
     if (recognitionRef.current) {
       try { recognitionRef.current.abort(); } catch {}
     }
@@ -578,6 +609,7 @@ export function AiCopilot({
       recognition.lang = "en-IN";
 
       let captured = "";
+      let latestInterim = "";
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onresult = (event: any) => {
@@ -590,6 +622,7 @@ export function AiCopilot({
             interim += trans;
           }
         }
+        latestInterim = interim;
         setInput(captured || interim);
       };
 
@@ -600,8 +633,9 @@ export function AiCopilot({
 
       recognition.onend = () => {
         setIsListening(false);
-        if (captured.trim().length > 2) {
-          handleSend(captured.trim());
+        const spoken = (captured || latestInterim).trim();
+        if (spoken.length > 2) {
+          void handleSend(spoken);
         }
       };
 
@@ -631,10 +665,19 @@ export function AiCopilot({
     if (!customPrompt) setInput("");
     setLoading(true);
 
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
+      const token = await getValidAccessToken();
       const res = await fetch("/api/ai", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        signal: controller.signal,
         body: JSON.stringify({
           message: textToSend,
           doctorContext: selectedDoctor
@@ -652,7 +695,10 @@ export function AiCopilot({
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
       if (data.reply) {
         const msgId = "ai-" + Date.now();
         const replyLang = data.lang || detectScriptLanguage(data.reply);
@@ -671,22 +717,27 @@ export function AiCopilot({
         throw new Error(data.error || "No reply from AI service");
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setMessages((prev) => [
         ...prev,
         {
           id: "err-" + Date.now(),
           sender: "ai",
-          text: `Notice: ${err instanceof Error ? err.message : "Service error"}. Reconnecting to Nutrova Clinical Knowledge Base.`,
+          text: `Notice: ${err instanceof Error ? err.message : "Service error"}.`,
           timestamp: "Just now",
         },
       ]);
     } finally {
-      setLoading(false);
+      if (abortRef.current === controller) {
+        setLoading(false);
+      }
     }
   };
 
   const resetChat = () => {
     stopSpeaking();
+    abortRef.current?.abort();
+    setLoading(false);
     setMessages([getInitialWelcome()]);
     setInput("");
     onToast("Chat refreshed! Ready for new query.");
@@ -696,7 +747,8 @@ export function AiCopilot({
     try {
       navigator.clipboard.writeText(cleanPlainText(text));
       setCopiedId(id);
-      setTimeout(() => setCopiedId(null), 2000);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopiedId(null), 2000);
       onToast("Copied clean text to clipboard!");
     } catch {
       onToast("Could not copy", "info");
@@ -772,15 +824,15 @@ export function AiCopilot({
       {/* LIVE VOICE CALL INTERFACE (Hands-Free Male Voice Audio Call)              */}
       {/* ========================================================================= */}
       {isVoiceCallActive && (
-        <div className="anim-pop rounded-3xl border-2 border-emerald-500/80 bg-gradient-to-b from-emerald-950 via-slate-900 to-emerald-950 p-6 text-white shadow-2xl relative overflow-hidden">
-          <div className="flex items-center justify-between border-b border-white/10 pb-4">
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-3 w-3 rounded-full bg-emerald-400 anim-pulse-soft" />
-              <span className="font-black text-xs sm:text-sm tracking-wide text-emerald-300 uppercase">
+        <div className="anim-pop rounded-3xl border-2 border-emerald-500/80 bg-gradient-to-b from-emerald-950 via-slate-900 to-emerald-950 p-4 sm:p-6 text-white shadow-2xl relative overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-4">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="flex h-3 w-3 shrink-0 rounded-full bg-emerald-400 anim-pulse-soft" />
+              <span className="font-black text-xs sm:text-sm tracking-wide text-emerald-300 uppercase break-words">
                 Live Male Voice Call · M Divakar Reddy
               </span>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex shrink-0 items-center gap-2.5">
               <span className="font-mono text-xs font-bold text-amber-300 bg-white/10 px-2.5 py-1 rounded-full">
                 {formatDuration(callDuration)}
               </span>
@@ -851,7 +903,7 @@ export function AiCopilot({
               {liveTranscript || "Speak naturally in Kannada, Telugu, Tamil, Malayalam, Hindi, or English — Divakar will answer in the same language."}
             </div>
 
-            <div className="flex items-center gap-4 pt-2">
+            <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4 pt-2">
               <button
                 type="button"
                 onClick={() => {
@@ -863,7 +915,7 @@ export function AiCopilot({
                     startCallListening();
                   }
                 }}
-                className={`flex items-center gap-2 rounded-full px-6 py-3.5 text-sm font-black shadow-xl transition active:scale-95 ${
+                className={`flex items-center gap-2 rounded-full px-5 sm:px-6 py-3.5 text-xs sm:text-sm font-black shadow-xl transition active:scale-95 ${
                   callStatus === "listening"
                     ? "bg-rose-500 text-white ring-4 ring-rose-300/40"
                     : "bg-emerald-500 text-emerald-950 hover:bg-emerald-400 ring-4 ring-emerald-400/30"
@@ -1024,13 +1076,13 @@ export function AiCopilot({
 
       {/* Chat Conversation Section with Hide/Show Toggle */}
       <div className="space-y-2">
-        <div className="flex items-center justify-between px-2 text-xs font-bold text-slate-500">
-          <div className="flex items-center gap-2">
-            <span className="flex h-2 w-2 rounded-full bg-emerald-500" />
-            <span>Conversation with M Divakar Reddy ({messages.length} messages)</span>
+        <div className="flex flex-wrap items-center justify-between gap-2 px-2 text-xs font-bold text-slate-500">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="flex h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
+            <span className="break-words">Conversation with M Divakar Reddy ({messages.length} messages)</span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
             <button
               type="button"
               onClick={() => setIsConversationHidden(!isConversationHidden)}
@@ -1066,7 +1118,7 @@ export function AiCopilot({
                     </div>
                   )}
                   <div
-                    className={`min-w-0 max-w-[92%] break-words rounded-2xl p-4 shadow-sm text-sm leading-relaxed sm:max-w-[85%] sm:p-5 ${
+                    className={`min-w-0 max-w-[calc(100%-3rem)] break-words rounded-2xl p-4 shadow-sm text-sm leading-relaxed sm:max-w-[85%] sm:p-5 ${
                       isUser
                         ? "bg-emerald-700 text-white font-medium"
                         : "bg-white border border-slate-200 text-slate-800"
@@ -1095,7 +1147,7 @@ export function AiCopilot({
                       <CleanFormattedText text={m.text} />
                     )}
 
-                    {!isUser && m.id !== "welcome" && (
+                    {!isUser && !m.id.startsWith("welcome") && (
                       <div className="mt-3.5 pt-2.5 border-t border-slate-100 flex flex-wrap items-center gap-2">
                         <button
                           type="button"
