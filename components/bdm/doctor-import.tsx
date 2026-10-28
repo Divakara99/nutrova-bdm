@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Download, Upload, X } from "lucide-react";
 
 /* Doctor CSV bulk upload — light emerald theme, matches the rest of the app.
@@ -351,6 +351,21 @@ export function DoctorImportDialog({
   const [parsed, setParsed] = useState<ParsedDoctor[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCloseRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
 
   async function handleFile(f: File | undefined | null) {
     if (!f) return;
@@ -399,11 +414,11 @@ export function DoctorImportDialog({
       onClick={onClose}
     >
       <div
-        className="anim-pop max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-t-3xl bg-white p-6 shadow-2xl sm:rounded-3xl sm:p-7"
+        className="anim-pop max-h-[92vh] w-full max-w-3xl overflow-y-auto overflow-x-hidden rounded-t-3xl bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl sm:rounded-3xl sm:p-7 sm:pb-7"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-5 flex items-center justify-between">
-          <div>
+        <div className="mb-5 flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
             <h3 className="text-xl font-extrabold tracking-tight text-slate-900">Upload doctors</h3>
             <p className="mt-1 text-xs font-medium text-slate-500">
               Bulk add from Excel (.xlsx) or CSV — same columns as Download. Only Name is required.
@@ -413,7 +428,7 @@ export function DoctorImportDialog({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200"
           >
             <X className="h-4 w-4" />
           </button>
@@ -470,8 +485,8 @@ export function DoctorImportDialog({
         )}
 
         {parsed.length > 0 && (
-          <div className="mt-3 max-h-64 overflow-y-auto rounded-2xl border border-slate-200">
-            <table className="w-full text-left text-xs">
+          <div className="mt-3 max-h-64 overflow-x-auto overflow-y-auto rounded-2xl border border-slate-200">
+            <table className="w-full min-w-[360px] text-left text-xs">
               <thead className="sticky top-0 bg-slate-800 text-[11px] font-extrabold uppercase tracking-wider text-white">
                 <tr>
                   <th className="px-3 py-2">Row</th>

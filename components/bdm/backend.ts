@@ -77,7 +77,7 @@ drop policy if exists "owner reads all" on public.nutrova_store;
 create policy "owner reads all" on public.nutrova_store
   for select
   to authenticated
-  using ((auth.jwt() ->> 'email') = 'divakar.reddy@nutrova.com');
+  using (lower(coalesce(auth.jwt() ->> 'email', '')) = 'divakar.reddy@nutrova.com');
 
 -- 3) Owner account details (safe: touches ONLY divakar.reddy@nutrova.com)
 update auth.users
@@ -216,6 +216,11 @@ function toSession(
    project. It can't be edited in the app, saved over on the phone, or overridden
    by a link, so the URL and key stay stable on every device. */
 const LOCKED_CONFIG: BackendConfig = { url: clean(DEFAULT_URL), key: DEFAULT_KEY };
+
+/* Safe on the server (no window/localStorage access) for API routes verifying JWTs. */
+export function getServerBackendConfig(): BackendConfig {
+  return { ...LOCKED_CONFIG };
+}
 
 /* Vercel/Supabase status helper for Settings + deploy checks (no secrets leaked). */
 export function backendSource(): { url: string; maskedKey: string; fromEnv: boolean } {
@@ -562,6 +567,29 @@ export async function signOutRemote(cfg: BackendConfig): Promise<void> {
     if (!error || !isKeyError(error.message)) break;
   }
   clearSession();
+}
+
+/* Return a fresh, non-expired Supabase access token for authenticated API calls (/api/ai). */
+export async function getValidAccessToken(cfg?: BackendConfig | null): Promise<string> {
+  const resolved = cfg ?? LOCKED_CONFIG;
+  for (const key of keyCandidates(resolved.key)) {
+    const r = await ready(clientFor(resolved.url, key));
+    if (!r.ok) {
+      if (isKeyError(r.error)) continue;
+      break;
+    }
+    try {
+      const { data } = await r.client.auth.getSession();
+      if (data.session?.access_token) {
+        toSession(data.session, data.session.user ?? undefined, loadSession()?.name || "");
+        return data.session.access_token;
+      }
+    } catch {
+      /* fall back below */
+    }
+    break;
+  }
+  return loadSession()?.access_token || "";
 }
 
 /* Change the signed-in user's password on the server */
